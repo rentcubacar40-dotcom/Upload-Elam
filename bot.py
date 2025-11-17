@@ -3,18 +3,18 @@ import logging
 import telebot
 import urllib.parse
 import time
+import re
 
 # ============================
 # CONFIGURACIÓN
 # ============================
 
-# ⚠️ Tokens incluidos directamente como pediste
 BOT_TOKEN = "8502790665:AAHuanhfYIe5ptUliYQBP7ognVOTG0uQoKk"
 MOODLE_TOKEN = "784e9718073ccee20854df8a10536659"
 MOODLE_URL = "https://aulaelam.sld.cu"
 
 MAX_FILE_SIZE_MB = 50
-MAX_RETRIES_UPLOAD = 3  # Número de reintentos de subida
+MAX_RETRIES_UPLOAD = 3  # Reintentos automáticos
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -23,6 +23,15 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 bot = telebot.TeleBot(BOT_TOKEN)
+
+# ============================
+# FUNCIONES DE ESCAPE PARA TELEGRAM
+# ============================
+
+def escape_markdown(text):
+    """Escapa caracteres especiales para MarkdownV2"""
+    escape_chars = r'\_*[]()~`>#+-=|{}.!'
+    return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
 
 # ============================
 # SESIÓN GLOBAL CON RETRIES
@@ -79,7 +88,7 @@ def subir_archivo_web_real(file_content, file_name):
                 'itemid': 0,
                 'client_id': user_id
             }
-            upload_response = session_global.post(upload_url, files=files, data=data, timeout=30)
+            upload_response = session_global.post(upload_url, files=files, data=data, timeout=90)
             if upload_response.status_code != 200:
                 raise Exception(f'Error subida: {upload_response.status_code}')
 
@@ -142,7 +151,7 @@ def subir_archivo_web_real(file_content, file_name):
         except Exception as e:
             logger.warning(f"Intento {attempt} fallido: {e}")
             if attempt < MAX_RETRIES_UPLOAD:
-                time.sleep(3)  # Espera antes del siguiente intento
+                time.sleep(3)
             else:
                 return {'exito': False, 'error': str(e)}
 
@@ -181,7 +190,7 @@ def manejar_documento(message):
             bot.reply_to(message, f"❌ Máximo permitido: {MAX_FILE_SIZE_MB}MB")
             return
 
-        mensaje = bot.reply_to(message, f"🌐 *{file_name}*\n🔄 Conectando con AulaElam web...", parse_mode='Markdown')
+        mensaje = bot.reply_to(message, f"🌐 *{escape_markdown(file_name)}*\n🔄 Conectando con AulaElam web...", parse_mode='Markdown')
         downloaded_file = bot.download_file(file_info.file_path)
 
         resultado = subir_archivo_web_real(downloaded_file, file_name)
@@ -190,23 +199,23 @@ def manejar_documento(message):
             status = "✅ Verificado" if resultado.get('enlace_verificado') else "⚠️ Por verificar"
             respuesta = (
                 f"🎉 *¡SUBIDO A WEB REAL!*\n\n"
-                f"📄 **Archivo:** `{resultado['nombre']}`\n"
+                f"📄 **Archivo:** `{escape_markdown(resultado['nombre'])}`\n"
                 f"💾 **Tamaño:** {resultado['tamaño'] / 1024 / 1024:.2f} MB\n"
                 f"👤 **Usuario ID:** `{resultado.get('user_id', 'N/A')}`\n"
                 f"🆔 **ItemID:** `{resultado['itemid']}`\n"
                 f"🔧 **ContextID:** `{resultado['contextid']}`\n"
                 f"🔍 **Estado:** {status}\n\n"
                 f"🔗 **ENLACE IDÉNTICO A AULAELAM:**\n"
-                f"`{resultado['enlace']}`"
+                f"`{escape_markdown(resultado['enlace'])}`"
             )
-            bot.edit_message_text(chat_id=message.chat.id, message_id=mensaje.message_id, text=respuesta, parse_mode='Markdown')
-            bot.send_message(message.chat.id, f"📎 **Enlace exacto:**\n{resultado['enlace']}", parse_mode='Markdown')
+            bot.edit_message_text(chat_id=message.chat.id, message_id=mensaje.message_id, text=respuesta, parse_mode='MarkdownV2')
+            bot.send_message(message.chat.id, f"📎 **Enlace exacto:**\n{resultado['enlace']}", parse_mode=None)
         else:
-            bot.edit_message_text(chat_id=message.chat.id, message_id=mensaje.message_id, text=f"❌ **Error web real:** {resultado['error']}", parse_mode='Markdown')
+            bot.edit_message_text(chat_id=message.chat.id, message_id=mensaje.message_id, text=f"❌ **Error web real:** {escape_markdown(resultado['error'])}", parse_mode='MarkdownV2')
 
     except Exception as e:
         logger.error(f"Error manejando documento: {e}")
-        bot.reply_to(message, f"❌ **Error:** {str(e)}", parse_mode='Markdown')
+        bot.reply_to(message, f"❌ **Error:** {str(e)}", parse_mode=None)
 
 # ============================
 # MAIN
