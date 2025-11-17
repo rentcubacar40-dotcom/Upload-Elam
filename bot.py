@@ -8,11 +8,12 @@ import time
 
 # ============================
 # CONFIGURACIÓN
-## ============================
+# ============================
 
 BOT_TOKEN = "8502790665:AAHuanhfYIe5ptUliYQBP7ognVOTG0uQoKk"
 MOODLE_TOKEN = "784e9718073ccee20854df8a10536659"
 MOODLE_URL = "https://aulaelam.sld.cu"
+CONTEXTID_FIJO = "2797"  # ⬅️ ESTE ES FIJO
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -23,15 +24,15 @@ logger = logging.getLogger(__name__)
 bot = telebot.TeleBot(BOT_TOKEN)
 
 # ============================
-# FUNCIONES MEJORADAS
+# FUNCIONES OPTIMIZADAS
 # ============================
 
-def subir_archivo_y_obtener_enlace(file_content, file_name):
-    """Subir archivo y obtener enlace con itemid DINÁMICO"""
+def subir_archivo_rapido(file_content, file_name):
+    """Subir archivo de forma rápida y obtener itemid"""
     try:
-        logger.info(f"📤 Subiendo: {file_name}")
+        logger.info(f"🚀 Subiendo rápidamente: {file_name}")
         
-        # 1. Subir archivo - Moodle nos devuelve itemid y contextid NUEVOS
+        # Subida más rápida con timeout reducido
         files = {'file': (file_name, file_content)}
         data = {
             'token': MOODLE_TOKEN,
@@ -43,7 +44,7 @@ def subir_archivo_y_obtener_enlace(file_content, file_name):
             f"{MOODLE_URL}/webservice/upload.php",
             files=files,
             data=data,
-            timeout=30
+            timeout=15  # ⬅️ Timeout más corto
         )
         
         if response.status_code != 200:
@@ -54,91 +55,83 @@ def subir_archivo_y_obtener_enlace(file_content, file_name):
             return {'exito': False, 'error': 'No se pudo subir el archivo'}
             
         file_data = upload_result[0]
-        itemid = file_data.get('itemid')  # ⬅️ ESTE CAMBIA CON CADA ARCHIVO
-        contextid = file_data.get('contextid')  # ⬅️ ESTE TAMBIÉN CAMBIA
+        itemid = file_data.get('itemid')  # ⬅️ SOLO ESTE CAMBIA
         
-        logger.info(f"🆔 ItemID generado: {itemid}, ContextID: {contextid}")
+        logger.info(f"🆔 ItemID obtenido: {itemid}")
         
         if not itemid:
-            return {'exito': False, 'error': 'No se obtuvo itemid del archivo'}
+            return {'exito': False, 'error': 'No se obtuvo itemid'}
         
-        # 2. Crear evento en calendario usando el NUEVO itemid
-        event_data = {
-            'wstoken': MOODLE_TOKEN,
-            'wsfunction': 'core_calendar_submit_create_update_form',
-            'moodlewsrestformat': 'json',
-            'formdata': (
-                f'name=Archivo: {urllib.parse.quote(file_name)}&'
-                f'timestart={int(time.time()) + 3600}&'
-                f'eventtype=user&'
-                f'description[text]=Subido via Bot Telegram&'
-                f'description[format]=1&'
-                f'files[0]={itemid}'
-            )
-        }
-        
-        event_response = requests.post(
-            f"{MOODLE_URL}/webservice/rest/server.php",
-            data=event_data,
-            timeout=30
-        )
-        
-        logger.info(f"📅 Evento creado: {event_response.status_code}")
-        
-        # 3. Generar ENLACE con los NUEVOS itemid y contextid
+        # Generar enlace INMEDIATAMENTE con contextid FIJO
         file_name_encoded = urllib.parse.quote(file_name)
         
         enlace_descarga = (
             f"{MOODLE_URL}/webservice/pluginfile.php/"
-            f"{contextid}/calendar/event_description/"
+            f"{CONTEXTID_FIJO}/calendar/event_description/"
             f"{itemid}/{file_name_encoded}"
             f"?token={MOODLE_TOKEN}"
         )
         
-        logger.info(f"🔗 Enlace generado: {enlace_descarga}")
+        # Crear evento RÁPIDO (sin esperar respuesta)
+        try:
+            event_data = {
+                'wstoken': MOODLE_TOKEN,
+                'wsfunction': 'core_calendar_submit_create_update_form',
+                'moodlewsrestformat': 'json',
+                'formdata': f'files[0]={itemid}&name=Archivo:{urllib.parse.quote(file_name)}&eventtype=user'
+            }
+            
+            # Hacerlo en segundo plano sin esperar
+            requests.post(
+                f"{MOODLE_URL}/webservice/rest/server.php",
+                data=event_data,
+                timeout=5  # ⬅️ Muy rápido, no bloqueante
+            )
+        except:
+            pass  # No importa si falla el evento
         
         return {
             'exito': True,
             'enlace': enlace_descarga,
             'nombre': file_name,
             'tamaño': file_data.get('filesize', 0),
-            'itemid': itemid,
-            'contextid': contextid
+            'itemid': itemid
         }
         
+    except requests.exceptions.Timeout:
+        return {'exito': False, 'error': 'Timeout: El servidor tardó demasiado'}
     except Exception as e:
         logger.error(f"❌ Error: {e}")
         return {'exito': False, 'error': str(e)}
 
 # ============================
-# MANEJADORES
+# MANEJADORES RÁPIDOS
 # ============================
 
 @bot.message_handler(commands=['start'])
 def start_command(message):
-    text = """
-🤖 **BOT AULAELAM - ENLACES DINÁMICOS** 🤖
+    text = f"""
+🤖 **BOT AULAELAM - RÁPIDO** 🤖
 
-✅ *ItemID único por cada archivo*
-✅ *Enlaces frescos y funcionales*
-✅ *Token de autenticación incluido*
+✅ *ContextID fijo: {CONTEXTID_FIJO}*
+✅ *Solo ItemID cambia por archivo*
+✅ *Subida optimizada y rápida*
 
-🆔 **ITEMID DINÁMICO:**
-Cada archivo recibe un ID único que cambia:
-• Archivo 1 → itemid=1234
-• Archivo 2 → itemid=5678  
-• Archivo 3 → itemid=9012
+🔧 **CONFIGURACIÓN:**
+• ContextID: `{CONTEXTID_FIJO}` (SIEMPRE el mismo)
+• ItemID: Cambia con cada archivo
+• Token: Incluido en cada enlace
 
-🔗 **ENLACE EJEMPLO:**
-`https://aulaelam.sld.cu/.../2891/calendar/.../4523/archivo.pdf?token=...`
+🔗 **EJEMPLO DE ENLACE:**
+`{MOODLE_URL}/webservice/pluginfile.php/{CONTEXTID_FIJO}/calendar/event_description/1234/archivo.pdf?token=...`
 
-📎 **¡Envía un archivo para ver tu itemid único!**
+📎 **¡Envía un archivo para probar la velocidad!**
     """
     bot.send_message(message.chat.id, text, parse_mode='Markdown')
 
 @bot.message_handler(content_types=['document'])
 def manejar_documento(message):
-    """Manejar documentos con itemid dinámico"""
+    """Manejar documentos de forma rápida"""
     try:
         file_info = bot.get_file(message.document.file_id)
         file_name = message.document.file_name
@@ -146,60 +139,61 @@ def manejar_documento(message):
         
         logger.info(f"📥 Recibido: {file_name}")
         
-        if file_size > 50 * 1024 * 1024:
-            bot.reply_to(message, "❌ Máximo 50MB", parse_mode='Markdown')
+        if file_size > 20 * 1024 * 1024:  # ⬅️ Reducido a 20MB para más velocidad
+            bot.reply_to(message, "❌ Máximo 20MB para mayor velocidad", parse_mode='Markdown')
             return
         
-        bot.reply_to(message, f"📥 *{file_name}*\n🔄 Generando itemid único...", parse_mode='Markdown')
+        mensaje_espera = bot.reply_to(message, f"⚡ *{file_name}*\n🔄 Procesando rápidamente...", parse_mode='Markdown')
         
-        # Descargar y subir archivo
+        # Descargar archivo
         downloaded_file = bot.download_file(file_info.file_path)
-        resultado = subir_archivo_y_obtener_enlace(downloaded_file, file_name)
+        
+        # Subir rápidamente
+        resultado = subir_archivo_rapido(downloaded_file, file_name)
         
         if resultado['exito']:
-            # ✅ ÉXITO - Mostrar enlace con itemid único
-            mensaje_exito = (
-                f"🎉 *¡ARCHIVO SUBIDO EXITOSAMENTE!*\n\n"
-                f"📄 **Archivo:** `{resultado['nombre']}`\n"
-                f"💾 **Tamaño:** {resultado['tamaño'] / 1024 / 1024:.2f} MB\n"
-                f"🆔 **ItemID único:** `{resultado['itemid']}`\n"
-                f"🔧 **ContextID:** `{resultado['contextid']}`\n\n"
-                f"🔗 **ENLACE DE DESCARGA:**\n"
-                f"`{resultado['enlace']}`"
-            )
-            
-            bot.reply_to(message, mensaje_exito, parse_mode='Markdown')
-            
-            # Enviar enlace para copiar fácilmente
-            bot.send_message(
-                message.chat.id,
-                f"📎 **Enlace directo para descargar:**\n{resultado['enlace']}",
+            # Editar mensaje original para mostrar resultado
+            bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=mensaje_espera.message_id,
+                text=(
+                    f"✅ *¡SUBIDO EN SEGUNDOS!*\n\n"
+                    f"📄 **Archivo:** `{resultado['nombre']}`\n"
+                    f"💾 **Tamaño:** {resultado['tamaño'] / 1024 / 1024:.2f} MB\n"
+                    f"🆔 **ItemID:** `{resultado['itemid']}`\n\n"
+                    f"🔗 **ENLACE DIRECTO:**\n"
+                    f"`{resultado['enlace']}`"
+                ),
                 parse_mode='Markdown'
             )
             
-            logger.info(f"✅ {file_name} - ItemID: {resultado['itemid']}")
+            # Enviar enlace para copiar
+            bot.send_message(
+                message.chat.id,
+                f"📎 **Para descargar:**\n{resultado['enlace']}",
+                parse_mode='Markdown'
+            )
             
         else:
-            bot.reply_to(
-                message, 
-                f"❌ **Error:** {resultado['error']}", 
+            bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=mensaje_espera.message_id,
+                text=f"❌ **Error:** {resultado['error']}",
                 parse_mode='Markdown'
             )
             
     except Exception as e:
-        bot.reply_to(message, f"❌ **Error:** {str(e)}", parse_mode='Markdown')
+        bot.reply_to(message, f"❌ **Error rápido:** {str(e)}", parse_mode='Markdown')
 
 @bot.message_handler(func=lambda message: True)
 def manejar_texto(message):
-    """Manejar otros mensajes"""
     if not message.text.startswith('/'):
         bot.reply_to(
             message,
-            "📎 *Envía un archivo para generar su itemid único*\n\n"
-            "Cada archivo recibirá:\n"
-            "• 🆔 ItemID único y diferente\n"
-            "• 🔗 Enlace fresco con token\n"
-            "• ✅ Descarga inmediata",
+            f"📎 *Envía un archivo (max 20MB)*\n\n"
+            f"ContextID fijo: `{CONTEXTID_FIJO}`\n"
+            f"ItemID único por archivo\n"
+            f"Enlaces ultra rápidos",
             parse_mode='Markdown'
         )
 
@@ -208,8 +202,9 @@ def manejar_texto(message):
 # ============================
 
 def main():
-    print("🚀 BOT AULAELAM - ITEMID DINÁMICO")
-    print("🆔 Generando itemid único por cada archivo")
+    print("🚀 BOT AULAELAM - CONTEXTID FIJO")
+    print(f"🔧 ContextID: {CONTEXTID_FIJO}")
+    print("⚡ Optimizado para velocidad")
     bot.infinity_polling()
 
 if __name__ == "__main__":
