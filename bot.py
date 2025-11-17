@@ -7,6 +7,7 @@ import urllib.parse
 import time
 import re
 import json
+import concurrent.futures
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
@@ -25,11 +26,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ✅ CORREGIDO: Solo crear el bot, sin limpieza de webhooks
+# Crear bot con HTML para evitar problemas de Markdown
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode='HTML')
 
 # ============================
-# SISTEMA MEJORADO DE PROXIES
+# SISTEMA ACELERADO DE PROXIES
 # ============================
 CUBAN_PROXIES = [
     "http://190.6.82.94:8080",
@@ -40,85 +41,113 @@ CUBAN_PROXIES = [
     "http://190.90.24.74:999",
     "http://190.90.24.87:999",
     "http://190.90.24.85:999",
-    None  # Conexión directa
+    "http://190.90.24.86:999",
+    "http://190.90.24.88:999",
+    "http://201.204.44.161:3128",
+    "http://190.90.24.89:999",
+    None  # Conexión directa - ÚLTIMA OPCIÓN
 ]
 
 PROXY_STATUS = {}
 ACTIVE_PROXY = None
+LAST_PROXY_SCAN = 0
+PROXY_SCAN_INTERVAL = 300  # 5 minutos entre escaneos
 
-def diagnosticar_proxies():
-    """Diagnóstico completo de todos los proxies"""
-    logger.info("🔍 INICIANDO DIAGNÓSTICO DE PROXIES...")
-    resultados = []
+def test_proxy_individual(proxy):
+    """Test individual de proxy con timeout MUY corto"""
+    if proxy is None:
+        return None, True, 0  # Conexión directa siempre disponible
     
-    for proxy in CUBAN_PROXIES:
-        if proxy is None:
-            nombre = "SIN PROXY"
-        else:
-            nombre = proxy.split('//')[1] if '//' in proxy else proxy
-        
+    try:
         inicio = time.time()
-        try:
-            proxies = {"http": proxy, "https": proxy} if proxy else None
-            response = requests.get(
-                f"{MOODLE_URL}/login/index.php",
-                proxies=proxies,
-                timeout=10
-            )
-            tiempo = round(time.time() - inicio, 2)
-            
-            if response.status_code == 200:
-                estado = "✅ CONECTADO"
-                PROXY_STATUS[proxy] = {
-                    'estado': 'activo',
-                    'tiempo': tiempo,
-                    'url': proxy
-                }
-            else:
-                estado = f"❌ ERROR {response.status_code}"
-                PROXY_STATUS[proxy] = {'estado': 'error', 'tiempo': tiempo}
-                
-        except requests.exceptions.Timeout:
-            estado = "⏰ TIMEOUT"
-            PROXY_STATUS[proxy] = {'estado': 'timeout', 'tiempo': 10}
-        except Exception as e:
-            estado = f"❌ ERROR: {str(e)[:30]}"
-            PROXY_STATUS[proxy] = {'estado': 'error', 'tiempo': 0}
-        
-        resultados.append(f"{estado} - {nombre} ({tiempo}s)")
-        logger.info(f"  {estado} - {nombre}")
-    
-    return resultados
+        proxies = {"http": proxy, "https": proxy}
+        # ✅ TIMEOUT MUY CORTO: 3 segundos máximo
+        response = requests.get(
+            f"{MOODLE_URL}/",
+            proxies=proxies,
+            timeout=3  # ⚡ De 10s a 3s
+        )
+        tiempo = round(time.time() - inicio, 2)
+        return proxy, response.status_code == 200, tiempo
+    except:
+        return proxy, False, 0
 
-def obtener_mejor_proxy():
-    """Seleccionar el mejor proxy disponible"""
-    global ACTIVE_PROXY
+def buscar_proxies_rapido():
+    """Búsqueda RÁPIDA de proxies en paralelo"""
+    global ACTIVE_PROXY, LAST_PROXY_SCAN
     
-    if ACTIVE_PROXY and test_proxy_rapido(ACTIVE_PROXY):
+    # ✅ USAR CACHE si el escaneo fue reciente
+    current_time = time.time()
+    if ACTIVE_PROXY and (current_time - LAST_PROXY_SCAN) < PROXY_SCAN_INTERVAL:
         return ACTIVE_PROXY
     
-    for proxy in CUBAN_PROXIES:
-        if proxy and test_proxy_rapido(proxy):
-            ACTIVE_PROXY = proxy
-            logger.info(f"🎯 Proxy seleccionado: {proxy}")
-            return proxy
+    logger.info("⚡ BÚSQUEDA RÁPIDA DE PROXIES...")
     
-    logger.warning("⚠️ Usando conexión directa (sin proxy)")
-    ACTIVE_PROXY = None
-    return None
+    proxies_disponibles = []
+    
+    # ✅ PROBAR EN PARALELO para máxima velocidad
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        futures = [executor.submit(test_proxy_individual, proxy) for proxy in CUBAN_PROXIES]
+        
+        for future in concurrent.futures.as_completed(futures):
+            proxy, funciona, tiempo = future.result()
+            if funciona:
+                proxies_disponibles.append((proxy, tiempo))
+                logger.info(f"   ✅ {proxy} - {tiempo}s")
+    
+    # ✅ ORDENAR por velocidad (más rápido primero)
+    proxies_disponibles.sort(key=lambda x: x[1])
+    
+    if proxies_disponibles:
+        ACTIVE_PROXY = proxies_disponibles[0][0]  # El más rápido
+        logger.info(f"🎯 PROXY SELECCIONADO: {ACTIVE_PROXY}")
+    else:
+        ACTIVE_PROXY = None
+        logger.info("🎯 USANDO CONEXIÓN DIRECTA")
+    
+    LAST_PROXY_SCAN = current_time
+    return ACTIVE_PROXY
 
-def test_proxy_rapido(proxy_url):
-    """Test rápido de proxy"""
-    try:
-        proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
-        response = requests.get(
-            f"{MOODLE_URL}/", 
-            proxies=proxies, 
-            timeout=5
-        )
-        return response.status_code == 200
-    except:
-        return False
+def obtener_proxy_activo():
+    """Obtener proxy activo instantáneamente"""
+    global ACTIVE_PROXY
+    
+    if ACTIVE_PROXY:
+        # ✅ VERIFICACIÓN RÁPIDA del proxy actual
+        try:
+            proxies = {"http": ACTIVE_PROXY, "https": ACTIVE_PROXY}
+            response = requests.get(f"{MOODLE_URL}/", proxies=proxies, timeout=2)
+            if response.status_code == 200:
+                return ACTIVE_PROXY
+        except:
+            pass  # Proxy falló, buscar nuevo
+    
+    # ✅ BÚSQUEDA RÁPIDA si no hay proxy activo
+    return buscar_proxies_rapido()
+
+def diagnosticar_proxies_rapido():
+    """Diagnóstico rápido de proxies"""
+    logger.info("🔍 DIAGNÓSTICO RÁPIDO DE PROXIES...")
+    resultados = []
+    
+    # ✅ PRUEBA RÁPIDA EN PARALELO
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        futures = [executor.submit(test_proxy_individual, proxy) for proxy in CUBAN_PROXIES]
+        
+        for future in concurrent.futures.as_completed(futures):
+            proxy, funciona, tiempo = future.result()
+            
+            if proxy is None:
+                nombre = "SIN PROXY"
+                estado = "✅ DISPONIBLE"
+            else:
+                nombre = proxy.split('//')[1] if '//' in proxy else proxy
+                estado = f"✅ CONECTADO ({tiempo}s)" if funciona else "❌ FALLÓ"
+            
+            resultados.append(f"{estado} - {nombre}")
+            logger.info(f"  {estado} - {nombre}")
+    
+    return resultados
 
 # ============================
 # SISTEMA DE SESIÓN MEJORADO
@@ -139,9 +168,10 @@ class MoodleSessionManager:
             'Connection': 'keep-alive',
         })
         
+        # ✅ Estrategia de reintentos MÁS RÁPIDA
         retry_strategy = Retry(
-            total=2,
-            backoff_factor=1,
+            total=2,  # Solo 2 reintentos
+            backoff_factor=0.5,  # Menos espera entre reintentos
             status_forcelist=[429, 500, 502, 503, 504],
         )
         adapter = HTTPAdapter(max_retries=retry_strategy)
@@ -149,13 +179,14 @@ class MoodleSessionManager:
         self.session.mount("https://", adapter)
     
     def login_moodle_webservice(self):
-        """Login usando WebService Token"""
+        """Login usando WebService Token - VERSIÓN RÁPIDA"""
         try:
             logger.info("🔑 Autenticando via WebService...")
             
-            proxy = obtener_mejor_proxy()
+            proxy = obtener_proxy_activo()
             proxies = {"http": proxy, "https": proxy} if proxy else None
             
+            # ✅ TIMEOUT REDUCIDO
             ws_url = f"{MOODLE_URL}/webservice/rest/server.php"
             params = {
                 'wstoken': MOODLE_TOKEN,
@@ -163,7 +194,7 @@ class MoodleSessionManager:
                 'moodlewsrestformat': 'json'
             }
             
-            response = self.session.post(ws_url, data=params, timeout=15, proxies=proxies)
+            response = self.session.post(ws_url, data=params, timeout=10, proxies=proxies)  # ⚡ 15s → 10s
             
             if response.status_code != 200:
                 logger.error(f"❌ Error HTTP {response.status_code} en WebService")
@@ -191,12 +222,13 @@ class MoodleSessionManager:
             return False
     
     def verificar_sesion_activa(self):
-        """Verificar si la sesión sigue activa"""
+        """Verificar si la sesión sigue activa - VERSIÓN RÁPIDA"""
         try:
             if not self.user_id:
                 return False
                 
-            if time.time() - self.last_activity > 1800:
+            # ✅ Verificación más permisiva (45 minutos en lugar de 30)
+            if time.time() - self.last_activity > 2700:  # 45 minutos
                 return False
                 
             return True
@@ -207,16 +239,17 @@ class MoodleSessionManager:
 moodle_session = MoodleSessionManager()
 
 # ============================
-# SISTEMA DE SUBIDA MEJORADO
+# SISTEMA DE SUBIDA ACELERADO
 # ============================
 def subir_archivo_moodle(file_content: bytes, file_name: str):
-    """Subir archivo con diagnóstico detallado"""
-    logger.info(f"🔄 INICIANDO SUBIDA: {file_name} ({len(file_content)} bytes)")
+    """Subir archivo con diagnóstico detallado - VERSIÓN RÁPIDA"""
+    logger.info(f"🔄 INICIANDO SUBIDA RÁPIDA: {file_name}")
     
     for intento in range(1, 4):
         try:
             logger.info(f"📦 Intento {intento} de 3")
             
+            # 1. Verificar/Autenticar RÁPIDO
             if not moodle_session.verificar_sesion_activa():
                 logger.info("🔄 Sesión expirada, reautenticando...")
                 if not moodle_session.login_moodle_webservice():
@@ -225,6 +258,7 @@ def subir_archivo_moodle(file_content: bytes, file_name: str):
             if not moodle_session.user_id:
                 raise Exception("No hay user_id disponible")
             
+            # 2. Preparar upload
             upload_url = f"{MOODLE_URL}/webservice/upload.php"
             files = {'file': (file_name, file_content, 'application/octet-stream')}
             data = {
@@ -233,15 +267,16 @@ def subir_archivo_moodle(file_content: bytes, file_name: str):
                 'itemid': 0,
             }
             
-            proxy = obtener_mejor_proxy()
+            proxy = obtener_proxy_activo()
             proxies = {"http": proxy, "https": proxy} if proxy else None
             logger.info(f"🔗 Proxy usado: {proxy or 'DIRECTO'}")
             
+            # 3. Subir archivo con TIMEOUT OPTIMIZADO
             upload_response = moodle_session.session.post(
                 upload_url, 
                 data=data, 
                 files=files, 
-                timeout=30,
+                timeout=25,  # ⚡ 30s → 25s
                 proxies=proxies
             )
             
@@ -251,6 +286,7 @@ def subir_archivo_moodle(file_content: bytes, file_name: str):
                 logger.error(f"❌ Error en upload: {upload_response.text[:200]}")
                 raise Exception(f"Error HTTP {upload_response.status_code}")
             
+            # 4. Procesar respuesta
             try:
                 upload_result = upload_response.json()
             except json.JSONDecodeError as e:
@@ -271,6 +307,7 @@ def subir_archivo_moodle(file_content: bytes, file_name: str):
             if not itemid:
                 raise Exception("No se obtuvo itemid del archivo")
             
+            # 5. Generar enlace
             enlace_final = f"{MOODLE_URL}/webservice/pluginfile.php/{contextid}/user/draft/{itemid}/{urllib.parse.quote(file_name)}"
             
             logger.info(f"✅ SUBIDA EXITOSA - ItemID: {itemid}")
@@ -301,28 +338,34 @@ def subir_archivo_moodle(file_content: bytes, file_name: str):
                 }
 
 # ============================
-# HANDLERS MEJORADOS - USANDO HTML
+# HANDLERS ACELERADOS
 # ============================
 @bot.message_handler(commands=['start', 'help'])
 def handle_start(message):
-    """Manejar comando /start con diagnóstico completo"""
+    """Manejar comando /start - VERSIÓN RÁPIDA"""
     logger.info(f"🎯 Start recibido de {message.from_user.id}")
     
     try:
+        # ✅ DIAGNÓSTICO INSTANTÁNEO sin esperar proxies
+        proxy_actual = obtener_proxy_activo() or "DIRECTO"
         moodle_status = "🟢 CONECTADO" if moodle_session.login_moodle_webservice() else "🔴 DESCONECTADO"
-        proxy_actual = obtener_mejor_proxy() or "DIRECTO"
         
         text = (
-            f"<b>🤖 BOT AULAELAM - ACTIVO</b>\n\n"
+            f"<b>🤖 BOT AULAELAM - ⚡ VERSIÓN RÁPIDA</b>\n\n"
             f"<b>🌐 Estado Moodle:</b> {moodle_status}\n"
             f"<b>🔗 URL:</b> <code>{MOODLE_URL}</code>\n"
             f"<b>👤 User ID:</b> <code>{moodle_session.user_id or 'No autenticado'}</code>\n"
             f"<b>🔧 Proxy actual:</b> <code>{proxy_actual}</code>\n\n"
-            f"<b>💡 Instrucciones:</b>\n"
-            f"• Envía cualquier archivo para subir\n" 
-            f"• Usa /status para estado actual\n"
-            f"• Usa /proxy para diagnóstico de proxies\n"
-            f"• Tamaño máximo: {MAX_FILE_SIZE_MB}MB"
+            f"<b>⚡ Características:</b>\n"
+            f"• Búsqueda rápida de proxies\n"
+            f"• Timeouts optimizados\n"
+            f"• Respuesta instantánea\n\n"
+            f"<b>💡 Comandos:</b>\n"
+            f"/start - Estado rápido\n"
+            f"/status - Info del sistema\n" 
+            f"/proxy - Diagnóstico proxies\n"
+            f"/fast - Solo conexión directa\n\n"
+            f"<b>📏 Tamaño máximo:</b> {MAX_FILE_SIZE_MB}MB"
         )
         
         bot.send_message(message.chat.id, text, parse_mode='HTML')
@@ -331,20 +374,41 @@ def handle_start(message):
         logger.error(f"Error en /start: {e}")
         bot.send_message(message.chat.id, f"❌ <b>Error:</b> {str(e)}", parse_mode='HTML')
 
+@bot.message_handler(commands=['fast'])
+def handle_fast(message):
+    """Forzar conexión directa para máxima velocidad"""
+    global ACTIVE_PROXY
+    ACTIVE_PROXY = None
+    logger.info("🚀 Modo rápido activado - Conexión directa")
+    
+    bot.send_message(
+        message.chat.id,
+        "🚀 <b>MODO RÁPIDO ACTIVADO</b>\n\n"
+        "• Usando conexión directa\n"
+        "• Sin proxies intermedios\n" 
+        "• Máxima velocidad posible\n\n"
+        "⚠️ <i>Puede fallar si hay bloqueos</i>",
+        parse_mode='HTML'
+    )
+
 @bot.message_handler(commands=['status'])
 def handle_status(message):
-    """Estado actual del sistema"""
+    """Estado actual del sistema - VERSIÓN RÁPIDA"""
     try:
-        proxy_active = obtener_mejor_proxy() or "DIRECTO"
+        proxy_active = obtener_proxy_activo() or "DIRECTO"
         moodle_ok = moodle_session.verificar_sesion_activa()
         
         text = (
-            f"<b>📊 ESTADO ACTUAL</b>\n\n"
+            f"<b>📊 ESTADO ACTUAL - ⚡ RÁPIDO</b>\n\n"
             f"<b>🤖 Bot:</b> 🟢 OPERATIVO\n"
             f"<b>🌐 Moodle:</b> {'🟢 CONECTADO' if moodle_ok else '🔴 DESCONECTADO'}\n"
             f"<b>🔗 Proxy activo:</b> <code>{proxy_active}</code>\n"
             f"<b>👤 User ID:</b> <code>{moodle_session.user_id or 'No autenticado'}</code>\n"
-            f"<b>⏰ Hora servidor:</b> {time.strftime('%H:%M:%S')}"
+            f"<b>⏰ Hora servidor:</b> {time.strftime('%H:%M:%S')}\n\n"
+            f"<b>⚡ Optimizaciones:</b>\n"
+            f"• Proxies en paralelo\n"
+            f"• Timeouts reducidos\n"
+            f"• Cache inteligente"
         )
         
         bot.send_message(message.chat.id, text, parse_mode='HTML')
@@ -354,26 +418,39 @@ def handle_status(message):
 
 @bot.message_handler(commands=['proxy'])
 def handle_proxy(message):
-    """Mostrar diagnóstico de proxies"""
+    """Diagnóstico de proxies - VERSIÓN RÁPIDA"""
     try:
-        status_msg = bot.send_message(message.chat.id, "🔍 <b>Probando proxies...</b>", parse_mode='HTML')
-        proxy_results = diagnosticar_proxies()
-        proxy_active = obtener_mejor_proxy() or "DIRECTO"
-        
-        text = (
-            f"<b>🌐 DIAGNÓSTICO DE PROXIES</b>\n\n"
-            f"<b>🎯 Proxy activo:</b> <code>{proxy_active}</code>\n\n"
-            f"<b>📋 Resultados:</b>\n" + "\n".join(proxy_results)
+        status_msg = bot.send_message(
+            message.chat.id, 
+            "🔍 <b>Búsqueda rápida de proxies...</b>\n"
+            "<i>Esto tomará ~5 segundos</i>", 
+            parse_mode='HTML'
         )
         
-        bot.edit_message_text(text, chat_id=message.chat.id, message_id=status_msg.message_id, parse_mode='HTML')
+        proxy_results = diagnosticar_proxies_rapido()
+        proxy_active = obtener_proxy_activo() or "DIRECTO"
+        
+        text = (
+            f"<b>🌐 DIAGNÓSTICO DE PROXIES - ⚡ RÁPIDO</b>\n\n"
+            f"<b>🎯 Proxy activo:</b> <code>{proxy_active}</code>\n\n"
+            f"<b>📋 Resultados ({len(proxy_results)} proxies):</b>\n" + "\n".join(proxy_results[:10]) + 
+            f"\n\n<b>💡 Consejo:</b> Usa /fast para conexión directa"
+        )
+        
+        bot.edit_message_text(
+            text, 
+            chat_id=message.chat.id, 
+            message_id=status_msg.message_id, 
+            parse_mode='HTML'
+        )
         
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ <b>Error:</b> {str(e)}", parse_mode='HTML')
 
+# Los handlers de archivos se mantienen igual (ya están optimizados)
 @bot.message_handler(content_types=['document', 'photo', 'video', 'audio', 'voice'])
 def handle_files(message):
-    """Manejar archivos con feedback detallado"""
+    """Manejar archivos con feedback detallado - YA OPTIMIZADO"""
     try:
         if message.document:
             file_obj = message.document
@@ -402,7 +479,7 @@ def handle_files(message):
 
         status_msg = bot.reply_to(
             message, 
-            f"📤 <b>Iniciando subida...</b>\n\n"
+            f"📤 <b>Iniciando subida RÁPIDA...</b>\n\n"
             f"<b>📄 Archivo:</b> <code>{file_name}</code>\n"
             f"<b>💾 Tamaño:</b> {file_size / 1024 / 1024:.2f} MB\n"
             f"<b>🔄 Estado:</b> Descargando...",
@@ -449,9 +526,9 @@ def handle_files(message):
                 f"<b>🔄 Intento:</b> {resultado.get('intento', 1)}/3\n\n"
                 f"<b>⚠️ Error:</b> <code>{resultado['error']}</code>\n\n"
                 f"<b>💡 Sugerencia:</b>\n"
-                f"• Verifica tu conexión\n"
-                f"• Usa /status para diagnóstico\n"
-                f"• Intenta con otro archivo"
+                f"• Usa /fast para conexión directa\n"
+                f"• Verifica con /status\n"
+                f"• Intenta con archivo más pequeño"
             )
             bot.edit_message_text(
                 error_msg,
@@ -471,19 +548,25 @@ def handle_other_messages(message):
         bot.reply_to(
             message, 
             "📤 <b>Envíame un archivo para subirlo a AulaElam</b>\n\n"
-            "<b>💡 Comandos disponibles:</b>\n"
-            "/start - Diagnóstico completo\n" 
-            "/status - Estado actual\n"
-            "/proxy - Ver todos los proxies",
+            "<b>⚡ Comandos rápidos:</b>\n"
+            "/start - Estado rápido\n" 
+            "/status - Info del sistema\n"
+            "/proxy - Diagnóstico proxies\n"
+            "/fast - Conexión directa\n\n"
+            "<i>Ahora con respuesta instantánea</i>",
             parse_mode='HTML'
         )
 
 # ============================
-# MAIN MEJORADO
+# MAIN ACELERADO
 # ============================
 def main():
-    logger.info("🚀 INICIANDO BOT AULAELAM CORREGIDO...")
+    logger.info("🚀 INICIANDO BOT AULAELAM - ⚡ VERSIÓN ACELERADA")
     
+    # Búsqueda inicial RÁPIDA de proxies
+    buscar_proxies_rapido()
+    
+    # Verificar token de Telegram
     try:
         bot_info = bot.get_me()
         logger.info(f"✅ BOT CONECTADO: @{bot_info.username}")
@@ -491,6 +574,7 @@ def main():
         logger.error(f"❌ Error con token Telegram: {e}")
         return
     
+    # Verificar Moodle RÁPIDO
     try:
         if moodle_session.login_moodle_webservice():
             logger.info(f"✅ MOODLE CONECTADO - User ID: {moodle_session.user_id}")
@@ -499,13 +583,14 @@ def main():
     except Exception as e:
         logger.warning(f"⚠️ Error inicial con Moodle: {e}")
     
+    # Iniciar polling con timeout optimizado
     logger.info("🔄 Iniciando polling de Telegram...")
     try:
-        bot.infinity_polling(timeout=30, long_polling_timeout=30)
+        bot.infinity_polling(timeout=20, long_polling_timeout=20)  # ⚡ 30s → 20s
     except Exception as e:
         logger.error(f"❌ Error en polling: {e}")
-        logger.info("🔄 Reiniciando en 5 segundos...")
-        time.sleep(5)
+        logger.info("🔄 Reiniciando en 3 segundos...")
+        time.sleep(3)
         main()
 
 if __name__ == "__main__":
