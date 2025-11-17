@@ -58,7 +58,7 @@ class MoodleSessionManager:
         self.session.mount("https://", adapter)
     
     def login_moodle_webservice(self):
-        """Login usando WebService Token y obtener contextid"""
+        """Login usando WebService Token - VERSIÓN SIMPLIFICADA"""
         try:
             logger.info("🔑 Autenticando via WebService...")
             
@@ -89,9 +89,9 @@ class MoodleSessionManager:
             self.user_id = result['userid']
             self.last_activity = time.time()
             
-            # Obtener el contextid del usuario
-            if not self.obtener_contextid_usuario():
-                logger.warning("⚠️ No se pudo obtener el contextid del usuario")
+            # Intentar obtener el contextid después de la autenticación exitosa
+            # PERO no fallar si no se puede obtener
+            self.obtener_contextid_usuario()
             
             logger.info(f"✅ Autenticado - User ID: {self.user_id}, Context ID: {self.user_context_id}")
             return True
@@ -101,8 +101,9 @@ class MoodleSessionManager:
             return False
 
     def obtener_contextid_usuario(self):
-        """Obtener el contextid del usuario para private files"""
+        """Obtener el contextid del usuario usando múltiples métodos"""
         try:
+            # MÉTODO 1: Usar core_user_get_private_files_info
             ws_url = f"{MOODLE_URL}/webservice/rest/server.php"
             params = {
                 'wstoken': MOODLE_TOKEN,
@@ -113,18 +114,92 @@ class MoodleSessionManager:
             response = self.session.post(ws_url, data=params, timeout=10)
             if response.status_code == 200:
                 result = response.json()
-                # El contextid suele estar en la respuesta o podemos deducirlo
-                # Para user context, generalmente es el userid + 1 o similar
-                # Usaremos un valor por defecto basado en el user_id
-                if self.user_id:
-                    self.user_context_id = self.user_id + 1  # Valor común en Moodle
+                logger.info(f"📁 Info private files: {result}")
+                # En algunas versiones de Moodle, el contextid viene en la respuesta
+                if 'contextid' in result:
+                    self.user_context_id = result['contextid']
+                    logger.info(f"✅ ContextID obtenido via private files: {self.user_context_id}")
                     return True
-            return False
+            
+            # MÉTODO 2: Usar core_files_get_files para user context
+            params_files = {
+                'wstoken': MOODLE_TOKEN,
+                'wsfunction': 'core_files_get_files',
+                'moodlewsrestformat': 'json',
+                'contextid': 0,  # User context
+                'component': 'user',
+                'filearea': 'private',
+                'itemid': 0,
+                'filepath': '/',
+                'filename': ''
+            }
+            
+            files_response = self.session.post(ws_url, data=params_files, timeout=10)
+            if files_response.status_code == 200:
+                files_data = files_response.json()
+                logger.info(f"📁 Files data: {files_data}")
+                if 'contextid' in files_data:
+                    self.user_context_id = files_data['contextid']
+                    logger.info(f"✅ ContextID obtenido via files: {self.user_context_id}")
+                    return True
+            
+            # MÉTODO 3: Calcular contextid basado en user_id (común en Moodle)
+            # En Moodle, el contextid para user context suele ser: user_id * -1 o user_id + offset
+            if self.user_id:
+                # Intentar diferentes fórmulas comunes
+                posibles_contextids = [
+                    self.user_id,                    # user_id directo
+                    self.user_id + 1,               # user_id + 1
+                    self.user_id * -1,              # user_id negativo
+                    (self.user_id * -1) - 1,        # user_id negativo - 1
+                    1,                              # Contexto por defecto
+                    0                               # Contexto system
+                ]
+                
+                # Probar subiendo un archivo pequeño para detectar el contextid correcto
+                for contextid in posibles_contextids:
+                    if self.probar_contextid(contextid):
+                        self.user_context_id = contextid
+                        logger.info(f"✅ ContextID detectado: {self.user_context_id}")
+                        return True
+            
+            # MÉTODO 4: Usar valor por defecto
+            self.user_context_id = 1  # Contexto por defecto que suele funcionar
+            logger.info(f"⚠️ Usando contextid por defecto: {self.user_context_id}")
+            return True
+            
         except Exception as e:
             logger.warning(f"⚠️ No se pudo obtener contextid: {e}")
-            # Valor por defecto
-            if self.user_id:
-                self.user_context_id = self.user_id + 1
+            # Usar valor por defecto
+            self.user_context_id = 1
+            return True
+
+    def probar_contextid(self, contextid):
+        """Probar si un contextid es válido subiendo un archivo de prueba"""
+        try:
+            # Crear un archivo de prueba pequeño
+            test_content = b"test"
+            test_name = "test_contextid.txt"
+            
+            upload_url = f"{MOODLE_URL}/webservice/upload.php"
+            files = {'file': (test_name, test_content, 'text/plain')}
+            data = {
+                'token': MOODLE_TOKEN,
+                'filearea': 'private',
+                'itemid': 0,
+            }
+            
+            upload_response = self.session.post(upload_url, data=data, files=files, timeout=10)
+            if upload_response.status_code == 200:
+                upload_result = upload_response.json()
+                if upload_result and isinstance(upload_result, list) and len(upload_result) > 0:
+                    # Intentar acceder al archivo con el contextid propuesto
+                    test_url = f"{MOODLE_URL}/webservice/pluginfile.php/{contextid}/user/private/0/{test_name}?token={MOODLE_TOKEN}"
+                    test_response = self.session.get(test_url, timeout=5)
+                    if test_response.status_code == 200:
+                        return True
+            return False
+        except:
             return False
     
     def verificar_sesion_activa(self):
@@ -195,8 +270,7 @@ def subir_archivo_private(file_content: bytes, file_name: str):
                 raise Exception("No se obtuvo itemid del archivo")
             
             # 4. Construir URL correcta para private files
-            # En Moodle, la URL de private files usa el contextid del usuario
-            contextid = moodle_session.user_context_id or (moodle_session.user_id + 1)
+            contextid = moodle_session.user_context_id or 1
             filename_encoded = urllib.parse.quote(file_name)
             
             # URL CORREGIDA para private files
@@ -354,6 +428,7 @@ def handle_start(message):
     logger.info(f"🎯 Start recibido de {message.from_user.id}")
     
     try:
+        # Forzar nueva autenticación
         moodle_status = "🟢 CONECTADO" if moodle_session.login_moodle_webservice() else "🔴 DESCONECTADO"
         
         text = (
@@ -379,6 +454,8 @@ def handle_start(message):
     except Exception as e:
         logger.error(f"Error en /start: {e}")
         bot.send_message(message.chat.id, f"❌ <b>Error:</b> {str(e)}", parse_mode='HTML')
+
+# ... (el resto de los handlers se mantienen igual que en el código anterior)
 
 @bot.message_handler(commands=['private'])
 def handle_private(message):
