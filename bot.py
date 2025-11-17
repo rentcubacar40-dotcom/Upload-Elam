@@ -3,46 +3,42 @@ import requests
 import logging
 import telebot
 from telebot import types
+import urllib.parse
+import time
 
 # ============================
 # CONFIGURACIÓN
 # ============================
 
-# Tokens configurados
 BOT_TOKEN = "8502790665:AAHuanhfYIe5ptUliYQBP7ognVOTG0uQoKk"
 MOODLE_TOKEN = "784e9718073ccee20854df8a10536659"
 MOODLE_URL = "https://aulaelam.sld.cu"
 
-# Configurar logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Inicializar bot
 bot = telebot.TeleBot(BOT_TOKEN)
 
 # ============================
-# FUNCIONES AULAELAM
+# FUNCIONES MEJORADAS
 # ============================
 
-def subir_archivo_aulaelam(file_content, file_name):
-    """Subir archivo a AulaElam y obtener enlace directo"""
+def subir_archivo_y_obtener_enlace(file_content, file_name):
+    """Subir archivo y obtener enlace con itemid DINÁMICO"""
     try:
-        logger.info(f"📤 Subiendo archivo: {file_name}")
+        logger.info(f"📤 Subiendo: {file_name}")
         
-        # Preparar datos para upload
-        files = {
-            'file': (file_name, file_content)
-        }
+        # 1. Subir archivo - Moodle nos devuelve itemid y contextid NUEVOS
+        files = {'file': (file_name, file_content)}
         data = {
             'token': MOODLE_TOKEN,
-            'filearea': 'draft',
+            'filearea': 'draft', 
             'itemid': '0'
         }
         
-        # Subir archivo
         response = requests.post(
             f"{MOODLE_URL}/webservice/upload.php",
             files=files,
@@ -50,221 +46,170 @@ def subir_archivo_aulaelam(file_content, file_name):
             timeout=30
         )
         
-        if response.status_code == 200:
-            resultado = response.json()
-            if resultado and len(resultado) > 0:
-                file_data = resultado[0]
-                contextid = file_data.get('contextid', '')
-                itemid = file_data.get('itemid', '')
-                
-                if contextid and itemid:
-                    # Generar enlace directo
-                    import urllib.parse
-                    file_name_encoded = urllib.parse.quote(file_name)
-                    enlace = (
-                        f"{MOODLE_URL}/webservice/pluginfile.php/"
-                        f"{contextid}/calendar/event_attachment/"
-                        f"{itemid}/{file_name_encoded}"
-                        f"?token={MOODLE_TOKEN}"
-                    )
-                    
-                    return {
-                        'exito': True,
-                        'enlace': enlace,
-                        'nombre': file_name,
-                        'tamaño': file_data.get('filesize', 0),
-                        'itemid': itemid,
-                        'contextid': contextid
-                    }
+        if response.status_code != 200:
+            return {'exito': False, 'error': f'Error HTTP {response.status_code}'}
+            
+        upload_result = response.json()
+        if not upload_result or len(upload_result) == 0:
+            return {'exito': False, 'error': 'No se pudo subir el archivo'}
+            
+        file_data = upload_result[0]
+        itemid = file_data.get('itemid')  # ⬅️ ESTE CAMBIA CON CADA ARCHIVO
+        contextid = file_data.get('contextid')  # ⬅️ ESTE TAMBIÉN CAMBIA
         
-        return {'exito': False, 'error': 'Error en la subida'}
+        logger.info(f"🆔 ItemID generado: {itemid}, ContextID: {contextid}")
         
-    except Exception as e:
-        logger.error(f"Error subiendo archivo: {e}")
-        return {'exito': False, 'error': str(e)}
-
-def crear_evento_calendario(file_name, itemid):
-    """Crear evento en calendario para hacer el archivo accesible"""
-    try:
-        import time
+        if not itemid:
+            return {'exito': False, 'error': 'No se obtuvo itemid del archivo'}
         
-        payload = {
+        # 2. Crear evento en calendario usando el NUEVO itemid
+        event_data = {
             'wstoken': MOODLE_TOKEN,
             'wsfunction': 'core_calendar_submit_create_update_form',
             'moodlewsrestformat': 'json',
             'formdata': (
-                f'name=Archivo: {file_name}&'
+                f'name=Archivo: {urllib.parse.quote(file_name)}&'
                 f'timestart={int(time.time()) + 3600}&'
                 f'eventtype=user&'
-                f'description[text]=Subido via Bot&'
+                f'description[text]=Subido via Bot Telegram&'
                 f'description[format]=1&'
                 f'files[0]={itemid}'
             )
         }
         
-        response = requests.post(
+        event_response = requests.post(
             f"{MOODLE_URL}/webservice/rest/server.php",
-            data=payload,
+            data=event_data,
             timeout=30
         )
         
-        return response.status_code == 200
+        logger.info(f"📅 Evento creado: {event_response.status_code}")
+        
+        # 3. Generar ENLACE con los NUEVOS itemid y contextid
+        file_name_encoded = urllib.parse.quote(file_name)
+        
+        enlace_descarga = (
+            f"{MOODLE_URL}/webservice/pluginfile.php/"
+            f"{contextid}/calendar/event_description/"
+            f"{itemid}/{file_name_encoded}"
+            f"?token={MOODLE_TOKEN}"
+        )
+        
+        logger.info(f"🔗 Enlace generado: {enlace_descarga}")
+        
+        return {
+            'exito': True,
+            'enlace': enlace_descarga,
+            'nombre': file_name,
+            'tamaño': file_data.get('filesize', 0),
+            'itemid': itemid,
+            'contextid': contextid
+        }
         
     except Exception as e:
-        logger.error(f"Error creando evento: {e}")
-        return False
+        logger.error(f"❌ Error: {e}")
+        return {'exito': False, 'error': str(e)}
 
 # ============================
-# MANEJADORES DE COMANDOS
+# MANEJADORES
 # ============================
 
 @bot.message_handler(commands=['start'])
 def start_command(message):
-    """Comando /start"""
     text = """
-🤖 **BOT AULAELAM - ACTIVO** 🤖
+🤖 **BOT AULAELAM - ENLACES DINÁMICOS** 🤖
 
-¡Hola! Soy tu asistente para subir archivos a AulaElam.
+✅ *ItemID único por cada archivo*
+✅ *Enlaces frescos y funcionales*
+✅ *Token de autenticación incluido*
 
-📁 **¿CÓMO FUNCIONO?**
-1. Envías cualquier archivo
-2. Lo subo a AulaElam automáticamente
-3. Te devuelvo el **ENLACE DIRECTO** de descarga
+🆔 **ITEMID DINÁMICO:**
+Cada archivo recibe un ID único que cambia:
+• Archivo 1 → itemid=1234
+• Archivo 2 → itemid=5678  
+• Archivo 3 → itemid=9012
 
-🔗 **ENLACES 100% FUNCIONALES**
-• Idénticos a los de AulaElam
-• Token incluido
-• Descarga inmediata
+🔗 **ENLACE EJEMPLO:**
+`https://aulaelam.sld.cu/.../2891/calendar/.../4523/archivo.pdf?token=...`
 
-📎 **¡Envía un archivo para comenzar!**
-
-🔧 *Comandos:*
-/start - Este mensaje
-/status - Ver estado
+📎 **¡Envía un archivo para ver tu itemid único!**
     """
     bot.send_message(message.chat.id, text, parse_mode='Markdown')
 
-@bot.message_handler(commands=['status'])
-def status_command(message):
-    """Comando /status - Verificar estado"""
-    try:
-        # Verificar conexión con AulaElam
-        response = requests.get(MOODLE_URL, timeout=10)
-        if response.status_code == 200:
-            estado = "🟢 Conectado"
-        else:
-            estado = f"🔴 Error {response.status_code}"
-        
-        text = f"""
-✅ **BOT ACTIVO - CHOREO**
-
-• **AulaElam:** {estado}
-• **Modo:** Polling
-• **Plataforma:** Choreo
-• **Estado:** 🟢 Funcionando
-
-¡Listo para recibir archivos!
-        """
-        bot.send_message(message.chat.id, text, parse_mode='Markdown')
-        
-    except Exception as e:
-        bot.send_message(message.chat.id, f"❌ Error de conexión: {str(e)}")
-
-# ============================
-# MANEJADOR DE ARCHIVOS
-# ============================
-
 @bot.message_handler(content_types=['document'])
 def manejar_documento(message):
-    """Manejar documentos subidos"""
+    """Manejar documentos con itemid dinámico"""
     try:
         file_info = bot.get_file(message.document.file_id)
         file_name = message.document.file_name
         file_size = message.document.file_size
         
-        logger.info(f"📥 Archivo recibido: {file_name} ({file_size} bytes)")
+        logger.info(f"📥 Recibido: {file_name}")
         
-        # Verificar tamaño (50MB máximo)
         if file_size > 50 * 1024 * 1024:
-            bot.reply_to(
-                message, 
-                "❌ *Archivo demasiado grande*\n\n• Límite: 50MB\n• Tu archivo: {:.2f}MB".format(file_size / 1024 / 1024),
-                parse_mode='Markdown'
-            )
+            bot.reply_to(message, "❌ Máximo 50MB", parse_mode='Markdown')
             return
         
-        # Notificar recepción
-        bot.reply_to(
-            message, 
-            f"📥 *{file_name}* recibido\n💾 *Tamaño:* {file_size / 1024 / 1024:.2f} MB\n🔄 *Subiendo a AulaElam...*",
-            parse_mode='Markdown'
-        )
+        bot.reply_to(message, f"📥 *{file_name}*\n🔄 Generando itemid único...", parse_mode='Markdown')
         
-        # Descargar archivo
+        # Descargar y subir archivo
         downloaded_file = bot.download_file(file_info.file_path)
-        
-        # Subir a AulaElam
-        resultado = subir_archivo_aulaelam(downloaded_file, file_name)
+        resultado = subir_archivo_y_obtener_enlace(downloaded_file, file_name)
         
         if resultado['exito']:
-            # Crear evento en calendario
-            evento_creado = crear_evento_calendario(file_name, resultado['itemid'])
-            
-            # Éxito - Enviar enlace
-            texto_exito = (
-                f"✅ *¡ARCHIVO SUBIDO EXITOSAMENTE!*\n\n"
+            # ✅ ÉXITO - Mostrar enlace con itemid único
+            mensaje_exito = (
+                f"🎉 *¡ARCHIVO SUBIDO EXITOSAMENTE!*\n\n"
                 f"📄 **Archivo:** `{resultado['nombre']}`\n"
                 f"💾 **Tamaño:** {resultado['tamaño'] / 1024 / 1024:.2f} MB\n"
-                f"📅 **Evento:** {'✅ Creado' if evento_creado else '⚠️ Sin evento'}\n\n"
-                f"🔗 **ENLACE DE DESCARGA DIRECTA:**\n"
+                f"🆔 **ItemID único:** `{resultado['itemid']}`\n"
+                f"🔧 **ContextID:** `{resultado['contextid']}`\n\n"
+                f"🔗 **ENLACE DE DESCARGA:**\n"
                 f"`{resultado['enlace']}`"
             )
             
-            bot.reply_to(message, texto_exito, parse_mode='Markdown')
-            bot.send_message(message.chat.id, f"📎 **Para copiar:**\n{resultado['enlace']}", parse_mode='Markdown')
+            bot.reply_to(message, mensaje_exito, parse_mode='Markdown')
             
-            logger.info(f"✅ Archivo {file_name} subido exitosamente")
+            # Enviar enlace para copiar fácilmente
+            bot.send_message(
+                message.chat.id,
+                f"📎 **Enlace directo para descargar:**\n{resultado['enlace']}",
+                parse_mode='Markdown'
+            )
+            
+            logger.info(f"✅ {file_name} - ItemID: {resultado['itemid']}")
             
         else:
             bot.reply_to(
                 message, 
-                f"❌ *Error al subir archivo*\n\n**Razón:** {resultado['error']}", 
+                f"❌ **Error:** {resultado['error']}", 
                 parse_mode='Markdown'
             )
-            logger.error(f"❌ Error subiendo {file_name}: {resultado['error']}")
             
     except Exception as e:
-        error_msg = f"❌ *Error inesperado:* {str(e)}"
-        bot.reply_to(message, error_msg, parse_mode='Markdown')
-        logger.error(f"❌ Error general: {e}")
+        bot.reply_to(message, f"❌ **Error:** {str(e)}", parse_mode='Markdown')
 
 @bot.message_handler(func=lambda message: True)
 def manejar_texto(message):
-    """Manejar otros mensajes de texto"""
+    """Manejar otros mensajes"""
     if not message.text.startswith('/'):
         bot.reply_to(
             message,
-            "📎 *Envía un archivo para subirlo a AulaElam*\n\nUsa /start para ver instrucciones.",
+            "📎 *Envía un archivo para generar su itemid único*\n\n"
+            "Cada archivo recibirá:\n"
+            "• 🆔 ItemID único y diferente\n"
+            "• 🔗 Enlace fresco con token\n"
+            "• ✅ Descarga inmediata",
             parse_mode='Markdown'
         )
 
 # ============================
-# INICIALIZACIÓN
+# INICIO
 # ============================
 
 def main():
-    """Función principal"""
-    logger.info("🚀 Iniciando Bot AulaElam en Choreo...")
-    logger.info(f"🤖 Token Bot: {BOT_TOKEN[:10]}...")
-    logger.info(f"🔑 Token Moodle: {MOODLE_TOKEN[:10]}...")
-    
-    print("=" * 50)
-    print("🤖 BOT AULAELAM - INICIADO")
-    print("🌐 Usando pyTelegramBotAPI")
-    print("📁 Listo para recibir archivos...")
-    print("=" * 50)
-    
-    # Iniciar el bot
+    print("🚀 BOT AULAELAM - ITEMID DINÁMICO")
+    print("🆔 Generando itemid único por cada archivo")
     bot.infinity_polling()
 
 if __name__ == "__main__":
