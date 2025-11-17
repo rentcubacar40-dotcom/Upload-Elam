@@ -239,17 +239,17 @@ class MoodleSessionManager:
 moodle_session = MoodleSessionManager()
 
 # ============================
-# SISTEMA DE SUBIDA ACELERADO
+# SISTEMAS DE SUBIDA MEJORADOS
 # ============================
-def subir_archivo_moodle(file_content: bytes, file_name: str):
-    """Subir archivo con diagnóstico detallado - VERSIÓN RÁPIDA"""
-    logger.info(f"🔄 INICIANDO SUBIDA RÁPIDA: {file_name}")
+def subir_archivo_draft(file_content: bytes, file_name: str):
+    """Subir archivo a DRAFT con enlace que incluye token"""
+    logger.info(f"🔄 SUBIENDO A DRAFT: {file_name}")
     
     for intento in range(1, 4):
         try:
             logger.info(f"📦 Intento {intento} de 3")
             
-            # 1. Verificar/Autenticar RÁPIDO
+            # 1. Verificar/Autenticar
             if not moodle_session.verificar_sesion_activa():
                 logger.info("🔄 Sesión expirada, reautenticando...")
                 if not moodle_session.login_moodle_webservice():
@@ -258,7 +258,7 @@ def subir_archivo_moodle(file_content: bytes, file_name: str):
             if not moodle_session.user_id:
                 raise Exception("No hay user_id disponible")
             
-            # 2. Preparar upload
+            # 2. Preparar upload a DRAFT
             upload_url = f"{MOODLE_URL}/webservice/upload.php"
             files = {'file': (file_name, file_content, 'application/octet-stream')}
             data = {
@@ -269,48 +269,36 @@ def subir_archivo_moodle(file_content: bytes, file_name: str):
             
             proxy = obtener_proxy_activo()
             proxies = {"http": proxy, "https": proxy} if proxy else None
-            logger.info(f"🔗 Proxy usado: {proxy or 'DIRECTO'}")
             
-            # 3. Subir archivo con TIMEOUT OPTIMIZADO
+            # 3. Subir archivo
             upload_response = moodle_session.session.post(
                 upload_url, 
                 data=data, 
                 files=files, 
-                timeout=25,  # ⚡ 30s → 25s
+                timeout=25,
                 proxies=proxies
             )
             
-            logger.info(f"📤 Response status: {upload_response.status_code}")
-            
             if upload_response.status_code != 200:
-                logger.error(f"❌ Error en upload: {upload_response.text[:200]}")
                 raise Exception(f"Error HTTP {upload_response.status_code}")
             
-            # 4. Procesar respuesta
-            try:
-                upload_result = upload_response.json()
-            except json.JSONDecodeError as e:
-                logger.error(f"❌ No se pudo decodificar JSON: {upload_response.text[:200]}")
-                raise Exception("Respuesta no es JSON válido")
+            upload_result = upload_response.json()
             
-            if not upload_result:
-                raise Exception("Respuesta vacía de Moodle")
+            if not upload_result or not isinstance(upload_result, list):
+                raise Exception("Respuesta inválida de Moodle")
             
-            if isinstance(upload_result, dict) and 'error' in upload_result:
-                raise Exception(f"Error Moodle: {upload_result['error']}")
-            
-            file_data = upload_result[0] if isinstance(upload_result, list) else upload_result
-            
+            file_data = upload_result[0]
             itemid = file_data.get('itemid')
             contextid = file_data.get('contextid', 1)
             
             if not itemid:
                 raise Exception("No se obtuvo itemid del archivo")
             
-            # 5. Generar enlace
-            enlace_final = f"{MOODLE_URL}/webservice/pluginfile.php/{contextid}/user/draft/{itemid}/{urllib.parse.quote(file_name)}"
+            # 4. ✅ GENERAR ENLACE DRAFT CON TOKEN
+            filename_encoded = urllib.parse.quote(file_name)
+            enlace_final = f"{MOODLE_URL}/webservice/pluginfile.php/{contextid}/user/draft/{itemid}/{filename_encoded}?token={MOODLE_TOKEN}"
             
-            logger.info(f"✅ SUBIDA EXITOSA - ItemID: {itemid}")
+            logger.info(f"✅ DRAFT EXITOSO - ItemID: {itemid}")
             
             return {
                 'exito': True,
@@ -321,7 +309,125 @@ def subir_archivo_moodle(file_content: bytes, file_name: str):
                 'contextid': contextid,
                 'user_id': moodle_session.user_id,
                 'proxy_used': proxy or 'DIRECTO',
-                'intento': intento
+                'intento': intento,
+                'tipo': 'draft'
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Intento {intento} fallido: {e}")
+            if intento < 3:
+                logger.info("⏳ Reintento en 2 segundos...")
+                time.sleep(2)
+                continue
+            else:
+                return {
+                    'exito': False, 
+                    'error': str(e),
+                    'intento': intento
+                }
+
+def crear_evento_calendario_con_archivo(file_content: bytes, file_name: str):
+    """Crear evento en calendario y adjuntar archivo"""
+    logger.info(f"📅 CREANDO EVENTO EN CALENDARIO: {file_name}")
+    
+    for intento in range(1, 4):
+        try:
+            logger.info(f"📦 Intento {intento} de 3")
+            
+            # 1. Verificar/Autenticar
+            if not moodle_session.verificar_sesion_activa():
+                logger.info("🔄 Sesión expirada, reautenticando...")
+                if not moodle_session.login_moodle_webservice():
+                    raise Exception("No se pudo autenticar con Moodle")
+            
+            if not moodle_session.user_id:
+                raise Exception("No hay user_id disponible")
+            
+            proxy = obtener_proxy_activo()
+            proxies = {"http": proxy, "https": proxy} if proxy else None
+            
+            # 2. PRIMERO: Subir archivo al área de draft
+            upload_url = f"{MOODLE_URL}/webservice/upload.php"
+            files = {'file': (file_name, file_content, 'application/octet-stream')}
+            data_upload = {
+                'token': MOODLE_TOKEN,
+                'filearea': 'draft',
+                'itemid': 0,
+            }
+            
+            upload_response = moodle_session.session.post(
+                upload_url, 
+                data=data_upload, 
+                files=files, 
+                timeout=25,
+                proxies=proxies
+            )
+            
+            if upload_response.status_code != 200:
+                raise Exception(f"Error subiendo archivo: {upload_response.status_code}")
+            
+            upload_result = upload_response.json()
+            if not upload_result or not isinstance(upload_result, list):
+                raise Exception("Respuesta inválida al subir archivo")
+            
+            file_data = upload_result[0]
+            draft_itemid = file_data.get('itemid')
+            
+            if not draft_itemid:
+                raise Exception("No se obtuvo itemid del archivo subido")
+            
+            logger.info(f"✅ Archivo subido a draft - ItemID: {draft_itemid}")
+            
+            # 3. SEGUNDO: Crear evento en el calendario
+            ws_url = f"{MOODLE_URL}/webservice/rest/server.php"
+            
+            # Crear evento con el archivo adjunto
+            timestamp = int(time.time())
+            params_evento = {
+                'wstoken': MOODLE_TOKEN,
+                'wsfunction': 'core_calendar_create_calendar_events',
+                'moodlewsrestformat': 'json',
+                'events[0][name]': f"Archivo: {file_name}",
+                'events[0][eventtype]': 'user',
+                'events[0][timestart]': timestamp,
+                'events[0][timeduration]': 0,
+                'events[0][description]': f'Archivo adjunto: {file_name}',
+                'events[0][descriptionformat]': 1,
+                'events[0][files]': f'{draft_itemid}'
+            }
+            
+            evento_response = moodle_session.session.post(
+                ws_url, 
+                data=params_evento, 
+                timeout=20,
+                proxies=proxies
+            )
+            
+            if evento_response.status_code != 200:
+                raise Exception(f"Error creando evento: {evento_response.status_code}")
+            
+            evento_result = evento_response.json()
+            logger.info(f"📅 Respuesta evento: {evento_result}")
+            
+            if not evento_result or 'events' not in evento_result:
+                raise Exception("No se pudo crear el evento en el calendario")
+            
+            # 4. ✅ GENERAR ENLACE EN FORMATO CALENDARIO CON TOKEN
+            filename_encoded = urllib.parse.quote(f"inline; {file_name}")
+            enlace_final = f"{MOODLE_URL}/webservice/pluginfile.php/1/calendar/event_description/{draft_itemid}/{filename_encoded}?token={MOODLE_TOKEN}"
+            
+            logger.info(f"✅ EVENTO CREADO - Enlace: {enlace_final}")
+            
+            return {
+                'exito': True,
+                'enlace': enlace_final,
+                'nombre': file_name,
+                'tamaño': file_data.get('filesize', len(file_content)),
+                'itemid': draft_itemid,
+                'user_id': moodle_session.user_id,
+                'proxy_used': proxy or 'DIRECTO',
+                'intento': intento,
+                'tipo': 'calendario'
             }
             
         except Exception as e:
@@ -338,7 +444,7 @@ def subir_archivo_moodle(file_content: bytes, file_name: str):
                 }
 
 # ============================
-# HANDLERS ACELERADOS
+# HANDLERS MEJORADOS
 # ============================
 @bot.message_handler(commands=['start', 'help'])
 def handle_start(message):
@@ -346,25 +452,25 @@ def handle_start(message):
     logger.info(f"🎯 Start recibido de {message.from_user.id}")
     
     try:
-        # ✅ DIAGNÓSTICO INSTANTÁNEO sin esperar proxies
         proxy_actual = obtener_proxy_activo() or "DIRECTO"
         moodle_status = "🟢 CONECTADO" if moodle_session.login_moodle_webservice() else "🔴 DESCONECTADO"
         
         text = (
-            f"<b>🤖 BOT AULAELAM - ⚡ VERSIÓN RÁPIDA</b>\n\n"
+            f"<b>🤖 BOT AULAELAM - ⚡ VERSIÓN MEJORADA</b>\n\n"
             f"<b>🌐 Estado Moodle:</b> {moodle_status}\n"
             f"<b>🔗 URL:</b> <code>{MOODLE_URL}</code>\n"
             f"<b>👤 User ID:</b> <code>{moodle_session.user_id or 'No autenticado'}</code>\n"
             f"<b>🔧 Proxy actual:</b> <code>{proxy_actual}</code>\n\n"
-            f"<b>⚡ Características:</b>\n"
-            f"• Búsqueda rápida de proxies\n"
-            f"• Timeouts optimizados\n"
-            f"• Respuesta instantánea\n\n"
+            f"<b>📁 SISTEMAS DE SUBIDA:</b>\n"
+            f"• <b>Draft:</b> Subida simple y rápida\n"
+            f"• <b>Calendario:</b> Crea evento con archivo\n\n"
             f"<b>💡 Comandos:</b>\n"
             f"/start - Estado rápido\n"
             f"/status - Info del sistema\n" 
             f"/proxy - Diagnóstico proxies\n"
-            f"/fast - Solo conexión directa\n\n"
+            f"/fast - Solo conexión directa\n"
+            f"/draft - Forzar subida a draft\n"
+            f"/calendar - Forzar subida a calendario\n\n"
             f"<b>📏 Tamaño máximo:</b> {MAX_FILE_SIZE_MB}MB"
         )
         
@@ -373,6 +479,30 @@ def handle_start(message):
     except Exception as e:
         logger.error(f"Error en /start: {e}")
         bot.send_message(message.chat.id, f"❌ <b>Error:</b> {str(e)}", parse_mode='HTML')
+
+@bot.message_handler(commands=['draft'])
+def handle_draft(message):
+    """Forzar subida a DRAFT"""
+    bot.reply_to(
+        message,
+        "📁 <b>MODO DRAFT ACTIVADO</b>\n\n"
+        "El próximo archivo se subirá al área DRAFT.\n"
+        "• Más rápido\n• Menos complejo\n• Enlace con token incluido\n\n"
+        "<i>Envía un archivo ahora</i>",
+        parse_mode='HTML'
+    )
+
+@bot.message_handler(commands=['calendar'])
+def handle_calendar(message):
+    """Forzar subida a CALENDARIO"""
+    bot.reply_to(
+        message,
+        "📅 <b>MODO CALENDARIO ACTIVADO</b>\n\n"
+        "El próximo archivo creará un evento en calendario.\n"
+        "• Enlace formato calendario\n• Evento visible en Moodle\n• Más robusto\n\n"
+        "<i>Envía un archivo ahora</i>",
+        parse_mode='HTML'
+    )
 
 @bot.message_handler(commands=['fast'])
 def handle_fast(message):
@@ -399,16 +529,16 @@ def handle_status(message):
         moodle_ok = moodle_session.verificar_sesion_activa()
         
         text = (
-            f"<b>📊 ESTADO ACTUAL - ⚡ RÁPIDO</b>\n\n"
+            f"<b>📊 ESTADO ACTUAL - ⚡ MEJORADO</b>\n\n"
             f"<b>🤖 Bot:</b> 🟢 OPERATIVO\n"
             f"<b>🌐 Moodle:</b> {'🟢 CONECTADO' if moodle_ok else '🔴 DESCONECTADO'}\n"
             f"<b>🔗 Proxy activo:</b> <code>{proxy_active}</code>\n"
             f"<b>👤 User ID:</b> <code>{moodle_session.user_id or 'No autenticado'}</code>\n"
             f"<b>⏰ Hora servidor:</b> {time.strftime('%H:%M:%S')}\n\n"
-            f"<b>⚡ Optimizaciones:</b>\n"
-            f"• Proxies en paralelo\n"
-            f"• Timeouts reducidos\n"
-            f"• Cache inteligente"
+            f"<b>⚡ Características:</b>\n"
+            f"• Subida a DRAFT y Calendario\n"
+            f"• Enlaces con token incluido\n"
+            f"• Proxies en paralelo"
         )
         
         bot.send_message(message.chat.id, text, parse_mode='HTML')
@@ -447,10 +577,16 @@ def handle_proxy(message):
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ <b>Error:</b> {str(e)}", parse_mode='HTML')
 
-# Los handlers de archivos se mantienen igual (ya están optimizados)
+# ============================
+# HANDLER PRINCIPAL DE ARCHIVOS
+# ============================
+modo_subida = 'auto'  # 'auto', 'draft', 'calendar'
+
 @bot.message_handler(content_types=['document', 'photo', 'video', 'audio', 'voice'])
 def handle_files(message):
-    """Manejar archivos con feedback detallado - YA OPTIMIZADO"""
+    """Manejar archivos con sistema dual"""
+    global modo_subida
+    
     try:
         if message.document:
             file_obj = message.document
@@ -477,9 +613,27 @@ def handle_files(message):
             bot.reply_to(message, f"❌ <b>Archivo muy grande. Máximo: {MAX_FILE_SIZE_MB}MB</b>", parse_mode='HTML')
             return
 
+        # Determinar modo de subida
+        modo_actual = modo_subida
+        if modo_actual == 'auto':
+            # Por defecto intentar calendario, si falla usar draft
+            modo_actual = 'calendar'
+        
+        if message.text and '/draft' in message.text:
+            modo_actual = 'draft'
+        elif message.text and '/calendar' in message.text:
+            modo_actual = 'calendar'
+
+        if modo_actual == 'draft':
+            status_text = "📁 <b>Subiendo a DRAFT...</b>"
+            funcion_subida = subir_archivo_draft
+        else:
+            status_text = "📅 <b>Creando evento en calendario...</b>"
+            funcion_subida = crear_evento_calendario_con_archivo
+
         status_msg = bot.reply_to(
             message, 
-            f"📤 <b>Iniciando subida RÁPIDA...</b>\n\n"
+            f"{status_text}\n\n"
             f"<b>📄 Archivo:</b> <code>{file_name}</code>\n"
             f"<b>💾 Tamaño:</b> {file_size / 1024 / 1024:.2f} MB\n"
             f"<b>🔄 Estado:</b> Descargando...",
@@ -490,7 +644,7 @@ def handle_files(message):
         downloaded = bot.download_file(file_info.file_path)
         
         bot.edit_message_text(
-            f"📤 <b>Subiendo archivo...</b>\n\n"
+            f"{status_text}\n\n"
             f"<b>📄 Archivo:</b> <code>{file_name}</code>\n"
             f"<b>💾 Tamaño:</b> {len(downloaded) / 1024 / 1024:.2f} MB\n"
             f"<b>🔄 Estado:</b> Conectando con Moodle...",
@@ -499,18 +653,44 @@ def handle_files(message):
             parse_mode='HTML'
         )
         
-        resultado = subir_archivo_moodle(downloaded, file_name)
+        # Ejecutar subida según el modo
+        resultado = funcion_subida(downloaded, file_name)
+        
+        # Si falla calendario y está en modo auto, intentar con draft
+        if not resultado['exito'] and modo_actual == 'calendar' and modo_subida == 'auto':
+            logger.info("🔄 Calendario falló, intentando con draft...")
+            bot.edit_message_text(
+                "🔄 <b>Calendario falló, intentando con DRAFT...</b>",
+                chat_id=message.chat.id,
+                message_id=status_msg.message_id,
+                parse_mode='HTML'
+            )
+            resultado = subir_archivo_draft(downloaded, file_name)
+            if resultado['exito']:
+                resultado['tipo'] = 'draft_fallback'
         
         if resultado['exito']:
+            tipo = resultado.get('tipo', 'desconocido')
+            if tipo == 'draft':
+                icono = "📁"
+                tipo_texto = "DRAFT"
+            elif tipo == 'draft_fallback':
+                icono = "📁🔄"
+                tipo_texto = "DRAFT (fallback)"
+            else:
+                icono = "📅"
+                tipo_texto = "CALENDARIO"
+            
             respuesta = (
-                f"🎉 <b>¡ARCHIVO SUBIDO EXITOSAMENTE!</b>\n\n"
+                f"🎉 <b>¡ARCHIVO SUBIDO EXITOSAMENTE!</b> {icono}\n\n"
                 f"<b>📄 Archivo:</b> <code>{resultado['nombre']}</code>\n"
                 f"<b>💾 Tamaño:</b> {resultado['tamaño'] / 1024 / 1024:.2f} MB\n"
+                f"<b>📦 Sistema:</b> {tipo_texto}\n"
                 f"<b>👤 User ID:</b> <code>{resultado['user_id']}</code>\n"
                 f"<b>🆔 Item ID:</b> <code>{resultado['itemid']}</code>\n"
                 f"<b>🔗 Proxy usado:</b> <code>{resultado['proxy_used']}</code>\n"
                 f"<b>🔄 Intento:</b> {resultado['intento']}/3\n\n"
-                f"<b>🔗 ENLACE DIRECTO:</b>\n<code>{resultado['enlace']}</code>"
+                f"<b>🔗 ENLACE FUNCIONAL:</b>\n<code>{resultado['enlace']}</code>"
             )
             bot.edit_message_text(
                 respuesta,
@@ -526,7 +706,7 @@ def handle_files(message):
                 f"<b>🔄 Intento:</b> {resultado.get('intento', 1)}/3\n\n"
                 f"<b>⚠️ Error:</b> <code>{resultado['error']}</code>\n\n"
                 f"<b>💡 Sugerencia:</b>\n"
-                f"• Usa /fast para conexión directa\n"
+                f"• Usa /draft para subida simple\n"
                 f"• Verifica con /status\n"
                 f"• Intenta con archivo más pequeño"
             )
@@ -548,20 +728,22 @@ def handle_other_messages(message):
         bot.reply_to(
             message, 
             "📤 <b>Envíame un archivo para subirlo a AulaElam</b>\n\n"
-            "<b>⚡ Comandos rápidos:</b>\n"
-            "/start - Estado rápido\n" 
+            "<b>⚡ Comandos disponibles:</b>\n"
+            "/start - Estado y ayuda\n" 
             "/status - Info del sistema\n"
             "/proxy - Diagnóstico proxies\n"
-            "/fast - Conexión directa\n\n"
-            "<i>Ahora con respuesta instantánea</i>",
+            "/fast - Conexión directa\n"
+            "/draft - Forzar subida a DRAFT\n"
+            "/calendar - Forzar subida a Calendario\n\n"
+            "<i>Enlaces con token incluido ✅</i>",
             parse_mode='HTML'
         )
 
 # ============================
-# MAIN ACELERADO
+# MAIN MEJORADO
 # ============================
 def main():
-    logger.info("🚀 INICIANDO BOT AULAELAM - ⚡ VERSIÓN ACELERADA")
+    logger.info("🚀 INICIANDO BOT AULAELAM - ⚡ SISTEMA DUAL")
     
     # Búsqueda inicial RÁPIDA de proxies
     buscar_proxies_rapido()
@@ -586,7 +768,7 @@ def main():
     # Iniciar polling con timeout optimizado
     logger.info("🔄 Iniciando polling de Telegram...")
     try:
-        bot.infinity_polling(timeout=20, long_polling_timeout=20)  # ⚡ 30s → 20s
+        bot.infinity_polling(timeout=20, long_polling_timeout=20)
     except Exception as e:
         logger.error(f"❌ Error en polling: {e}")
         logger.info("🔄 Reiniciando en 3 segundos...")
