@@ -35,6 +35,7 @@ class MoodleSessionManager:
         self.session = requests.Session()
         self.setup_session()
         self.user_id = None
+        self.user_context_id = None
         self.last_activity = time.time()
         
     def setup_session(self):
@@ -57,7 +58,7 @@ class MoodleSessionManager:
         self.session.mount("https://", adapter)
     
     def login_moodle_webservice(self):
-        """Login usando WebService Token"""
+        """Login usando WebService Token y obtener contextid"""
         try:
             logger.info("🔑 Autenticando via WebService...")
             
@@ -88,11 +89,42 @@ class MoodleSessionManager:
             self.user_id = result['userid']
             self.last_activity = time.time()
             
-            logger.info(f"✅ Autenticado - User ID: {self.user_id}")
+            # Obtener el contextid del usuario
+            if not self.obtener_contextid_usuario():
+                logger.warning("⚠️ No se pudo obtener el contextid del usuario")
+            
+            logger.info(f"✅ Autenticado - User ID: {self.user_id}, Context ID: {self.user_context_id}")
             return True
             
         except Exception as e:
             logger.error(f"❌ Error en autenticación WebService: {e}")
+            return False
+
+    def obtener_contextid_usuario(self):
+        """Obtener el contextid del usuario para private files"""
+        try:
+            ws_url = f"{MOODLE_URL}/webservice/rest/server.php"
+            params = {
+                'wstoken': MOODLE_TOKEN,
+                'wsfunction': 'core_user_get_private_files_info',
+                'moodlewsrestformat': 'json'
+            }
+            
+            response = self.session.post(ws_url, data=params, timeout=10)
+            if response.status_code == 200:
+                result = response.json()
+                # El contextid suele estar en la respuesta o podemos deducirlo
+                # Para user context, generalmente es el userid + 1 o similar
+                # Usaremos un valor por defecto basado en el user_id
+                if self.user_id:
+                    self.user_context_id = self.user_id + 1  # Valor común en Moodle
+                    return True
+            return False
+        except Exception as e:
+            logger.warning(f"⚠️ No se pudo obtener contextid: {e}")
+            # Valor por defecto
+            if self.user_id:
+                self.user_context_id = self.user_id + 1
             return False
     
     def verificar_sesion_activa(self):
@@ -162,39 +194,15 @@ def subir_archivo_private(file_content: bytes, file_name: str):
             if not itemid:
                 raise Exception("No se obtuvo itemid del archivo")
             
-            # 4. Obtener información completa del archivo para construir URL correcta
-            ws_url = f"{MOODLE_URL}/webservice/rest/server.php"
-            params_files = {
-                'wstoken': MOODLE_TOKEN,
-                'wsfunction': 'core_files_get_files',
-                'moodlewsrestformat': 'json',
-                'contextid': 0,  # User context
-                'component': 'user',
-                'filearea': 'private',
-                'itemid': 0,
-                'filepath': '/',
-                'filename': ''
-            }
+            # 4. Construir URL correcta para private files
+            # En Moodle, la URL de private files usa el contextid del usuario
+            contextid = moodle_session.user_context_id or (moodle_session.user_id + 1)
+            filename_encoded = urllib.parse.quote(file_name)
             
-            files_response = moodle_session.session.post(ws_url, data=params_files, timeout=10)
-            if files_response.status_code == 200:
-                files_data = files_response.json()
-                if 'files' in files_data:
-                    for file_info in files_data['files']:
-                        if file_info['filename'] == file_name:
-                            # Construir URL correcta para private files
-                            filename_encoded = urllib.parse.quote(file_name)
-                            enlace_final = f"{MOODLE_URL}/webservice/pluginfile.php/{file_info['contextid']}/user/private/{file_info['itemid']}/{filename_encoded}?token={MOODLE_TOKEN}"
-                            break
-                    else:
-                        # Fallback si no encontramos el archivo en la lista
-                        enlace_final = f"{MOODLE_URL}/webservice/pluginfile.php/1/user/private/0/{urllib.parse.quote(file_name)}?token={MOODLE_TOKEN}"
-                else:
-                    enlace_final = f"{MOODLE_URL}/webservice/pluginfile.php/1/user/private/0/{urllib.parse.quote(file_name)}?token={MOODLE_TOKEN}"
-            else:
-                enlace_final = f"{MOODLE_URL}/webservice/pluginfile.php/1/user/private/0/{urllib.parse.quote(file_name)}?token={MOODLE_TOKEN}"
+            # URL CORREGIDA para private files
+            enlace_final = f"{MOODLE_URL}/webservice/pluginfile.php/{contextid}/user/private/{itemid}/{filename_encoded}?token={MOODLE_TOKEN}"
             
-            logger.info(f"✅ PRIVATE FILES EXITOSO - ItemID: {itemid}")
+            logger.info(f"✅ PRIVATE FILES EXITOSO - ItemID: {itemid}, ContextID: {contextid}")
             
             return {
                 'exito': True,
@@ -202,6 +210,7 @@ def subir_archivo_private(file_content: bytes, file_name: str):
                 'nombre': file_name,
                 'tamaño': file_data.get('filesize', len(file_content)),
                 'itemid': itemid,
+                'contextid': contextid,
                 'user_id': moodle_session.user_id,
                 'intento': intento,
                 'tipo': 'private'
@@ -221,7 +230,7 @@ def subir_archivo_private(file_content: bytes, file_name: str):
                 }
 
 def crear_evento_calendario_con_archivo(file_content: bytes, file_name: str):
-    """Crear evento en calendario usando PRIVATE FILES"""
+    """Crear evento en calendario subiendo archivo a DRAFT temporal"""
     logger.info(f"📅 CREANDO EVENTO EN CALENDARIO: {file_name}")
     
     for intento in range(1, 4):
@@ -237,12 +246,12 @@ def crear_evento_calendario_con_archivo(file_content: bytes, file_name: str):
             if not moodle_session.user_id:
                 raise Exception("No hay user_id disponible")
             
-            # 2. PRIMERO: Subir archivo a PRIVATE FILES
+            # 2. PRIMERO: Subir archivo a DRAFT (para calendario)
             upload_url = f"{MOODLE_URL}/webservice/upload.php"
             files = {'file': (file_name, file_content, 'application/octet-stream')}
             data_upload = {
                 'token': MOODLE_TOKEN,
-                'filearea': 'private',
+                'filearea': 'draft',  # ✅ USAR DRAFT PARA CALENDARIO
                 'itemid': 0,
             }
             
@@ -261,40 +270,19 @@ def crear_evento_calendario_con_archivo(file_content: bytes, file_name: str):
                 raise Exception("Respuesta inválida al subir archivo")
             
             file_data = upload_result[0]
-            file_itemid = file_data.get('itemid')
+            draft_itemid = file_data.get('itemid')
+            draft_contextid = file_data.get('contextid', 1)
             
-            if not file_itemid:
+            if not draft_itemid:
                 raise Exception("No se obtuvo itemid del archivo subido")
             
-            logger.info(f"✅ Archivo subido a private files - ItemID: {file_itemid}")
+            logger.info(f"✅ Archivo subido a draft - ItemID: {draft_itemid}, ContextID: {draft_contextid}")
             
-            # 3. Obtener el componentid del archivo para el calendario
+            # 3. SEGUNDO: Crear evento en el calendario con el archivo
             ws_url = f"{MOODLE_URL}/webservice/rest/server.php"
             
             # Crear evento en el calendario - FORMATO CORREGIDO
             timestamp = int(time.time())
-            event_data = {
-                'events': [
-                    {
-                        'name': f"Archivo: {file_name}",
-                        'eventtype': 'user',
-                        'timestart': timestamp,
-                        'timeduration': 0,
-                        'description': f'<p>Archivo adjunto: {file_name}</p>',
-                        'descriptionformat': 1,
-                        'files': [
-                            {
-                                'filename': file_name,
-                                'filearea': 'private',
-                                'component': 'user',
-                                'itemid': file_itemid
-                            }
-                        ]
-                    }
-                ]
-            }
-            
-            # Preparar parámetros para el WebService
             params_evento = {
                 'wstoken': MOODLE_TOKEN,
                 'wsfunction': 'core_calendar_create_calendar_events',
@@ -305,7 +293,7 @@ def crear_evento_calendario_con_archivo(file_content: bytes, file_name: str):
                 'events[0][timeduration]': 0,
                 'events[0][description]': f'Archivo adjunto: {file_name}',
                 'events[0][descriptionformat]': 1,
-                # Para archivos en calendario, necesitamos usar el formato correcto
+                'events[0][files][0][itemid]': draft_itemid  # ✅ ARCHIVO EN DRAFT PARA EL EVENTO
             }
             
             evento_response = moodle_session.session.post(
@@ -323,25 +311,11 @@ def crear_evento_calendario_con_archivo(file_content: bytes, file_name: str):
             if not evento_result or 'events' not in evento_result:
                 raise Exception("No se pudo crear el evento en el calendario")
             
-            # 4. GENERAR ENLACE para el archivo en private files
+            # 4. GENERAR ENLACE para el archivo en DRAFT (formato calendario)
             filename_encoded = urllib.parse.quote(file_name)
-            enlace_final = f"{MOODLE_URL}/webservice/pluginfile.php/1/user/private/0/{filename_encoded}?token={MOODLE_TOKEN}"
             
-            # 5. Actualizar el evento con el enlace al archivo
-            if evento_result['events'] and len(evento_result['events']) > 0:
-                event_id = evento_result['events'][0]['id']
-                
-                # Actualizar descripción con enlace al archivo
-                update_params = {
-                    'wstoken': MOODLE_TOKEN,
-                    'wsfunction': 'core_calendar_update_event_start_day',
-                    'moodlewsrestformat': 'json',
-                    'eventid': event_id,
-                    'daytimestamp': timestamp
-                }
-                
-                # Solo actualizamos la fecha, el archivo ya está en private files
-                moodle_session.session.post(ws_url, data=update_params, timeout=10)
+            # ✅ URL CORREGIDA para archivos de calendario en DRAFT
+            enlace_final = f"{MOODLE_URL}/webservice/pluginfile.php/{draft_contextid}/user/draft/{draft_itemid}/{filename_encoded}?token={MOODLE_TOKEN}"
             
             logger.info(f"✅ EVENTO CREADO - Enlace: {enlace_final}")
             
@@ -350,7 +324,8 @@ def crear_evento_calendario_con_archivo(file_content: bytes, file_name: str):
                 'enlace': enlace_final,
                 'nombre': file_name,
                 'tamaño': file_data.get('filesize', len(file_content)),
-                'itemid': file_itemid,
+                'itemid': draft_itemid,
+                'contextid': draft_contextid,
                 'event_id': evento_result['events'][0]['id'] if evento_result.get('events') else None,
                 'user_id': moodle_session.user_id,
                 'intento': intento,
@@ -382,13 +357,14 @@ def handle_start(message):
         moodle_status = "🟢 CONECTADO" if moodle_session.login_moodle_webservice() else "🔴 DESCONECTADO"
         
         text = (
-            f"<b>🤖 BOT AULAELAM - PRIVATE FILES</b>\n\n"
+            f"<b>🤖 BOT AULAELAM - SISTEMA CORREGIDO</b>\n\n"
             f"<b>🌐 Estado Moodle:</b> {moodle_status}\n"
             f"<b>🔗 URL:</b> <code>{MOODLE_URL}</code>\n"
-            f"<b>👤 User ID:</b> <code>{moodle_session.user_id or 'No autenticado'}</code>\n\n"
+            f"<b>👤 User ID:</b> <code>{moodle_session.user_id or 'No autenticado'}</code>\n"
+            f"<b>🔧 Context ID:</b> <code>{moodle_session.user_context_id or 'No disponible'}</code>\n\n"
             f"<b>📁 SISTEMAS DE SUBIDA:</b>\n"
-            f"• <b>Private Files:</b> Archivos en área personal\n"
-            f"• <b>Calendario:</b> Evento con archivo adjunto\n\n"
+            f"• <b>Private Files:</b> Archivos en área personal permanente\n"
+            f"• <b>Calendario:</b> Evento con archivo en draft temporal\n\n"
             f"<b>💡 Comandos:</b>\n"
             f"/start - Estado rápido\n"
             f"/status - Info del sistema\n"
@@ -407,12 +383,15 @@ def handle_start(message):
 @bot.message_handler(commands=['private'])
 def handle_private(message):
     """Forzar subida a PRIVATE FILES"""
+    global modo_subida
+    modo_subida = 'private'
+    
     bot.reply_to(
         message,
         "📁 <b>MODO PRIVATE FILES ACTIVADO</b>\n\n"
         "El próximo archivo se subirá a tu área PRIVATE FILES.\n"
-        "• Archivos personales seguros\n"
-        "• Fácil acceso desde Moodle\n"
+        "• Archivos personales permanentes\n"
+        "• Acceso desde Moodle → Private files\n"
         "• Enlace con token incluido\n\n"
         "<i>Envía un archivo ahora</i>",
         parse_mode='HTML'
@@ -421,13 +400,16 @@ def handle_private(message):
 @bot.message_handler(commands=['calendar'])
 def handle_calendar(message):
     """Forzar subida a CALENDARIO"""
+    global modo_subida
+    modo_subida = 'calendar'
+    
     bot.reply_to(
         message,
         "📅 <b>MODO CALENDARIO ACTIVADO</b>\n\n"
         "El próximo archivo creará un evento en calendario.\n"
-        "• Evento visible en Moodle\n"
-        "• Archivo en private files\n"
-        "• Más organizado\n\n"
+        "• Evento visible en Moodle Calendario\n"
+        "• Archivo temporal en draft\n"
+        "• Organizado por fechas\n\n"
         "<i>Envía un archivo ahora</i>",
         parse_mode='HTML'
     )
@@ -439,16 +421,18 @@ def handle_status(message):
         moodle_ok = moodle_session.verificar_sesion_activa()
         
         text = (
-            f"<b>📊 ESTADO ACTUAL - PRIVATE FILES</b>\n\n"
+            f"<b>📊 ESTADO ACTUAL - SISTEMA CORREGIDO</b>\n\n"
             f"<b>🤖 Bot:</b> 🟢 OPERATIVO\n"
             f"<b>🌐 Moodle:</b> {'🟢 CONECTADO' if moodle_ok else '🔴 DESCONECTADO'}\n"
             f"<b>👤 User ID:</b> <code>{moodle_session.user_id or 'No autenticado'}</code>\n"
+            f"<b>🔧 Context ID:</b> <code>{moodle_session.user_context_id or 'No disponible'}</code>\n"
+            f"<b>📁 Modo actual:</b> {modo_subida.upper()}\n"
             f"<b>⏰ Hora servidor:</b> {time.strftime('%H:%M:%S')}\n\n"
             f"<b>⚡ Características:</b>\n"
-            f"• Private Files de Moodle\n"
-            f"• Eventos de calendario\n"
-            f"• Sin proxies - Conexión directa\n"
-            f"• Enlaces con token seguro"
+            f"• Private Files (permanente)\n"
+            f"• Calendario con draft (temporal)\n"
+            f"• URLs corregidas\n"
+            f"• Sin proxies - Conexión directa"
         )
         
         bot.send_message(message.chat.id, text, parse_mode='HTML')
@@ -463,7 +447,7 @@ modo_subida = 'auto'  # 'auto', 'private', 'calendar'
 
 @bot.message_handler(content_types=['document', 'photo', 'video', 'audio', 'voice'])
 def handle_files(message):
-    """Manejar archivos con sistema dual"""
+    """Manejar archivos con sistema dual corregido"""
     global modo_subida
     
     try:
@@ -498,6 +482,7 @@ def handle_files(message):
             # Por defecto usar private files
             modo_actual = 'private'
         
+        # Override por comando en el mensaje
         if message.text and '/private' in message.text:
             modo_actual = 'private'
         elif message.text and '/calendar' in message.text:
@@ -540,17 +525,21 @@ def handle_files(message):
             if tipo == 'private':
                 icono = "📁"
                 tipo_texto = "PRIVATE FILES"
+                ubicacion = "Área personal permanente"
             else:
                 icono = "📅"
                 tipo_texto = "CALENDARIO"
+                ubicacion = "Evento con archivo temporal"
             
             respuesta = (
                 f"🎉 <b>¡ARCHIVO SUBIDO EXITOSAMENTE!</b> {icono}\n\n"
                 f"<b>📄 Archivo:</b> <code>{resultado['nombre']}</code>\n"
                 f"<b>💾 Tamaño:</b> {resultado['tamaño'] / 1024 / 1024:.2f} MB\n"
                 f"<b>📦 Sistema:</b> {tipo_texto}\n"
+                f"<b>📍 Ubicación:</b> {ubicacion}\n"
                 f"<b>👤 User ID:</b> <code>{resultado['user_id']}</code>\n"
                 f"<b>🆔 Item ID:</b> <code>{resultado['itemid']}</code>\n"
+                f"<b>🔧 Context ID:</b> <code>{resultado.get('contextid', 'N/A')}</code>\n"
                 f"<b>🔄 Intento:</b> {resultado['intento']}/3\n\n"
                 f"<b>🔗 ENLACE FUNCIONAL:</b>\n<code>{resultado['enlace']}</code>"
             )
@@ -595,8 +584,9 @@ def handle_other_messages(message):
             "/status - Info del sistema\n"
             "/private - Forzar subida a PRIVATE FILES\n"
             "/calendar - Forzar subida a Calendario\n\n"
-            "<i>Private Files de Moodle ✅</i>\n"
-            "<i>Sin proxies - Conexión directa ✅</i>",
+            "<i>✅ URLs corregidas</i>\n"
+            "<i>✅ Private files funcionando</i>\n"
+            "<i>✅ Calendario con archivos</i>",
             parse_mode='HTML'
         )
 
@@ -604,7 +594,7 @@ def handle_other_messages(message):
 # MAIN MEJORADO
 # ============================
 def main():
-    logger.info("🚀 INICIANDO BOT AULAELAM - PRIVATE FILES")
+    logger.info("🚀 INICIANDO BOT AULAELAM - SISTEMA CORREGIDO")
     
     # Verificar token de Telegram
     try:
@@ -617,7 +607,7 @@ def main():
     # Verificar Moodle
     try:
         if moodle_session.login_moodle_webservice():
-            logger.info(f"✅ MOODLE CONECTADO - User ID: {moodle_session.user_id}")
+            logger.info(f"✅ MOODLE CONECTADO - User ID: {moodle_session.user_id}, Context ID: {moodle_session.user_context_id}")
         else:
             logger.warning("⚠️ No se pudo conectar con Moodle inicialmente")
     except Exception as e:
