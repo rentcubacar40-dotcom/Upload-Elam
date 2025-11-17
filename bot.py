@@ -8,7 +8,7 @@ import time
 
 # ============================
 # CONFIGURACIÓN
-# ============================
+## ============================
 
 BOT_TOKEN = "8502790665:AAHuanhfYIe5ptUliYQBP7ognVOTG0uQoKk"
 MOODLE_TOKEN = "784e9718073ccee20854df8a10536659"
