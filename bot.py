@@ -6,6 +6,7 @@ from telebot import types
 import urllib.parse
 import time
 import re
+import sys
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
@@ -24,7 +25,33 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-bot = telebot.TeleBot(BOT_TOKEN)
+# ============================
+# LIMPIAR INSTANCIAS ANTERIORES
+# ============================
+def limpiar_instancias_anteriores():
+    """Cerrar cualquier instancia previa del bot"""
+    logger.info("🔧 Limpiando instancias anteriores...")
+    try:
+        # Cerrar webhook previo (si existe)
+        requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook", timeout=5)
+        logger.info("✅ Webhook anterior eliminado")
+    except:
+        logger.info("ℹ️ No había webhook activo")
+    
+    try:
+        # Cerrar sesión de polling previa
+        requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/close", timeout=5)
+        logger.info("✅ Sesión polling anterior cerrada")
+    except:
+        logger.info("ℹ️ No había sesión polling activa")
+    
+    time.sleep(3)  # Esperar para asegurar cierre
+
+# Ejecutar limpieza al inicio
+limpiar_instancias_anteriores()
+
+# Crear bot después de la limpieza
+bot = telebot.TeleBot(BOT_TOKEN, parse_mode=None)
 
 # ============================
 # PROXIES CUBANOS
@@ -34,60 +61,41 @@ CUBAN_PROXIES = [
     "http://190.6.81.150:8080",
     "http://152.206.125.20:8080",
     "http://152.206.135.55:8080",
-    "http://201.204.44.161:3128",
-    "http://190.90.24.74:999",
-    "http://190.90.24.87:999",
     None  # Último recurso: sin proxy
 ]
 
 ACTIVE_PROXY = None
-PROXY_LAST_TEST = 0
-PROXY_TEST_INTERVAL = 300  # 5 minutos
 
 def test_proxy(proxy_url):
     """Probar si un proxy funciona con Moodle"""
     try:
         proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
-        start_time = time.time()
         response = requests.get(
             f"{MOODLE_URL}/login/index.php", 
             proxies=proxies, 
             timeout=10
         )
-        response_time = time.time() - start_time
-        
-        if response.status_code == 200:
-            logger.info(f"✅ Proxy funcional: {proxy_url} ({(response_time):.1f}s)")
-            return True
-        else:
-            logger.warning(f"❌ Proxy falló - Status {response.status_code}: {proxy_url}")
-            return False
-    except Exception as e:
-        logger.debug(f"❌ Proxy error {proxy_url}: {e}")
+        return response.status_code == 200
+    except:
         return False
 
 def get_working_proxy():
-    """Obtener un proxy funcional con cache inteligente"""
-    global ACTIVE_PROXY, PROXY_LAST_TEST
+    """Obtener un proxy funcional"""
+    global ACTIVE_PROXY
     
-    # Si tenemos un proxy activo y no ha pasado mucho tiempo, reutilizar
-    current_time = time.time()
-    if ACTIVE_PROXY and (current_time - PROXY_LAST_TEST) < PROXY_TEST_INTERVAL:
+    if ACTIVE_PROXY and test_proxy(ACTIVE_PROXY):
         return ACTIVE_PROXY
     
     logger.info("🔍 Buscando proxy cubano funcional...")
     
-    # Probar proxies en orden
     for proxy in CUBAN_PROXIES:
         if test_proxy(proxy):
             ACTIVE_PROXY = proxy
-            PROXY_LAST_TEST = current_time
+            logger.info(f"✅ Proxy seleccionado: {proxy}")
             return proxy
     
-    # Si ningún proxy funciona, usar sin proxy como último recurso
     logger.warning("⚠️ Ningún proxy funcionó, usando conexión directa")
     ACTIVE_PROXY = None
-    PROXY_LAST_TEST = current_time
     return None
 
 def make_cuban_request(url, method="GET", data=None, files=None, timeout=30):
@@ -101,105 +109,35 @@ def make_cuban_request(url, method="GET", data=None, files=None, timeout=30):
         else:
             response = requests.post(url, data=data, files=files, proxies=proxies, timeout=timeout)
         return response
-    except requests.exceptions.ProxyError as e:
-        logger.error(f"❌ Error de proxy: {e}")
-        # Marcar proxy como inválido y reintentar
-        global ACTIVE_PROXY
-        ACTIVE_PROXY = None
-        raise Exception(f"Error de proxy: {str(e)}")
     except Exception as e:
         logger.error(f"❌ Error en request: {e}")
         raise
 
 # ============================
-# MANEJO AVANZADO DE COOKIES Y SESIÓN
+# MANEJO DE SESIÓN MOODLE
 # ============================
 class MoodleSessionManager:
     def __init__(self):
         self.session = requests.Session()
         self.setup_session()
         self.last_login = 0
-        self.login_interval = 1800  # 30 minutos
         
     def setup_session(self):
-        """Configurar sesión con headers realistas"""
+        """Configurar sesión"""
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
-            'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         })
         
-        # Configurar reintentos
-        retry_strategy = Retry(
-            total=3,
-            backoff_factor=1,
-            status_forcelist=[429, 500, 502, 503, 504],
-        )
+        retry_strategy = Retry(total=3, backoff_factor=1, status_forcelist=[500,502,503,504])
         adapter = HTTPAdapter(max_retries=retry_strategy)
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
     
-    def ensure_valid_session(self):
-        """Asegurar que tenemos una sesión válida"""
-        current_time = time.time()
-        
-        # Si ha pasado mucho tiempo desde el último login, renovar
-        if current_time - self.last_login > self.login_interval:
-            logger.info("🔄 Renovando sesión Moodle...")
-            return self.login_to_moodle()
-        
-        # Verificar si la sesión actual es válida
-        if self.test_session():
-            return True
-        else:
-            logger.info("🔐 Sesión inválida, iniciando nuevo login...")
-            return self.login_to_moodle()
-    
-    def test_session(self):
-        """Verificar si la sesión actual es válida"""
-        try:
-            test_url = f"{MOODLE_URL}/my/"
-            response = make_cuban_request(test_url, timeout=10)
-            
-            # Usar BeautifulSoup para analizar si estamos logueados
-            soup = BeautifulSoup(response.text, 'lxml')
-            
-            # Buscar indicadores de sesión válida
-            logout_link = soup.find('a', string=re.compile(r'logout|salir|cerrar', re.IGNORECASE))
-            user_menu = soup.find('div', class_=re.compile(r'usermenu|user-menu'))
-            dashboard = soup.find('h1', string=re.compile(r'mis cursos|dashboard|panel', re.IGNORECASE))
-            
-            if logout_link or user_menu or dashboard:
-                logger.info("✅ Sesión Moodle válida detectada")
-                return True
-            
-            # También verificar por texto en la respuesta
-            if "mis cursos" in response.text.lower() or "logout" in response.text.lower():
-                return True
-                
-            return False
-        except Exception as e:
-            logger.warning(f"❌ Error testeando sesión: {e}")
-            return False
-    
     def login_to_moodle(self):
-        """Iniciar sesión en Moodle usando token de webservice"""
+        """Iniciar sesión en Moodle"""
         try:
-            logger.info("🔑 Iniciando sesión en Moodle via WebService...")
-            
-            # Primero obtener la página de login para cookies iniciales
-            login_page = f"{MOODLE_URL}/login/index.php"
-            response = make_cuban_request(login_page, timeout=10)
-            
-            # Analizar la página de login con BeautifulSoup
-            soup = BeautifulSoup(response.text, 'lxml')
-            logger.info(f"📄 Página de login obtenida. Título: {soup.title.string if soup.title else 'No title'}")
+            logger.info("🔑 Iniciando sesión en Moodle...")
             
             # Usar el webservice para autenticación
             ws_url = f"{MOODLE_URL}/webservice/rest/server.php"
@@ -216,212 +154,97 @@ class MoodleSessionManager:
                 if 'userid' in result:
                     self.last_login = time.time()
                     logger.info(f"✅ Login exitoso. User ID: {result['userid']}")
-                    
-                    # Actualizar cookies en la sesión
-                    if response.cookies:
-                        self.session.cookies.update(response.cookies)
-                    
-                    # Verificar cookies obtenidas
-                    cookies = self.session.cookies.get_dict()
-                    logger.info(f"🍪 Cookies obtenidas: {list(cookies.keys())}")
-                    
                     return True
-                elif 'error' in result:
-                    logger.error(f"❌ Error en login: {result['error']}")
-                    return False
             
-            logger.error(f"❌ Falló el login via WebService. Status: {response.status_code}")
+            logger.error("❌ Falló el login via WebService")
             return False
             
         except Exception as e:
             logger.error(f"❌ Error en login: {e}")
             return False
-    
-    def make_moodle_request(self, url, method="GET", data=None, files=None, timeout=30):
-        """Hacer request a Moodle con manejo automático de sesión y proxies"""
-        # Asegurar sesión válida antes de cada request importante
-        if "upload.php" in url or "webservice" in url:
-            if not self.ensure_valid_session():
-                raise Exception("No se pudo establecer sesión válida con Moodle")
-        
-        # Usar make_cuban_request que maneja los proxies
-        return make_cuban_request(url, method, data, files, timeout)
 
 # Instancia global del gestor de sesión
 moodle_session = MoodleSessionManager()
 
 # ============================
-# FUNCIÓN DE SUBIDA MEJORADA CON PROXIES
+# FUNCIÓN DE SUBIDA
 # ============================
 def subir_archivo_moodle(file_content: bytes, file_name: str):
-    """Subir archivo a Moodle con manejo adecuado de sesión y proxies"""
-    for attempt in range(1, 4):  # 3 intentos
-        try:
-            logger.info(f"🔄 Intento {attempt} - Subiendo: {file_name}")
-            
-            # 1. Verificar que tenemos sesión válida
-            if not moodle_session.ensure_valid_session():
-                raise Exception("No se pudo establecer sesión con Moodle")
-            
-            # 2. Obtener información del usuario
-            ws_url = f"{MOODLE_URL}/webservice/rest/server.php"
-            params = {
-                'wstoken': MOODLE_TOKEN,
-                'wsfunction': 'core_webservice_get_site_info',
-                'moodlewsrestformat': 'json'
-            }
-            
-            response = moodle_session.make_moodle_request(ws_url, method="POST", data=params)
-            
-            if response.status_code != 200:
-                raise Exception(f"Error en site_info: {response.status_code}")
-            
-            site_info = response.json()
-            if 'error' in site_info:
-                raise Exception(f"Error Moodle: {site_info['error']}")
-            
-            user_id = site_info.get('userid')
-            logger.info(f"👤 Usuario ID: {user_id}")
-            
-            # 3. Subir archivo al área draft
-            upload_url = f"{MOODLE_URL}/webservice/upload.php"
-            
-            files = {
-                'file': (file_name, file_content, 'application/octet-stream')
-            }
-            
-            data = {
-                'token': MOODLE_TOKEN,
-                'filearea': 'draft',
-                'itemid': 0,
-                'component': 'user',
-                'filepath': '/',
-                'contextlevel': 'user',
-                'instanceid': user_id
-            }
-            
-            # Log del proxy actual
-            current_proxy = get_working_proxy()
-            logger.info(f"🔗 Usando proxy: {current_proxy or 'DIRECTO'}")
-            
-            upload_response = moodle_session.make_moodle_request(
-                upload_url, method="POST", data=data, files=files, timeout=60
-            )
-            
-            if upload_response.status_code != 200:
-                logger.error(f"❌ Status code upload: {upload_response.status_code}")
-                logger.error(f"❌ Response: {upload_response.text[:500]}")
-                raise Exception(f"Error en upload: {upload_response.status_code}")
-            
-            # Procesar respuesta
-            try:
-                upload_result = upload_response.json()
-            except ValueError as e:
-                logger.error(f"❌ No se pudo parsear JSON: {upload_response.text[:500]}")
-                raise Exception("Respuesta inválida de Moodle")
-            
-            if not upload_result:
-                raise Exception("Respuesta vacía de Moodle")
-            
-            file_data = upload_result[0]
-            
-            if 'error' in file_data:
-                raise Exception(f"Error Moodle: {file_data['error']}")
-            
-            # 4. Generar enlace de descarga
-            itemid = file_data.get('itemid')
-            contextid = file_data.get('contextid', 1)
-            
-            if not itemid:
-                raise Exception("No se obtuvo itemid del archivo")
-            
-            enlace_final = f"{MOODLE_URL}/webservice/pluginfile.php/{contextid}/user/draft/{itemid}/{urllib.parse.quote(file_name)}?token={MOODLE_TOKEN}"
-            
-            logger.info(f"✅ Archivo subido exitosamente. ItemID: {itemid}")
-            
-            return {
-                'exito': True,
-                'enlace': enlace_final,
-                'nombre': file_name,
-                'tamaño': file_data.get('filesize', len(file_content)),
-                'itemid': itemid,
-                'contextid': contextid,
-                'user_id': user_id,
-                'proxy_used': current_proxy or 'DIRECTO'
-            }
-            
-        except Exception as e:
-            logger.warning(f"❌ Intento {attempt} fallido: {e}")
-            if attempt < 3:
-                time.sleep(2)
-                # Limpiar sesión y reintentar
-                moodle_session.session.cookies.clear()
-                # Forzar nuevo proxy en el próximo intento
-                global ACTIVE_PROXY
-                ACTIVE_PROXY = None
-                continue
-            else:
-                return {'exito': False, 'error': str(e)}
+    """Subir archivo a Moodle"""
+    try:
+        logger.info(f"🔄 Subiendo: {file_name}")
+        
+        # 1. Login a Moodle
+        if not moodle_session.login_to_moodle():
+            raise Exception("No se pudo conectar con Moodle")
+        
+        # 2. Subir archivo
+        upload_url = f"{MOODLE_URL}/webservice/upload.php"
+        
+        files = {'file': (file_name, file_content)}
+        data = {
+            'token': MOODLE_TOKEN,
+            'filearea': 'draft',
+            'itemid': 0,
+        }
+        
+        upload_response = make_cuban_request(
+            upload_url, method="POST", data=data, files=files, timeout=60
+        )
+        
+        if upload_response.status_code != 200:
+            raise Exception(f"Error en upload: {upload_response.status_code}")
+        
+        upload_result = upload_response.json()
+        
+        if not upload_result:
+            raise Exception("Respuesta vacía de Moodle")
+        
+        file_data = upload_result[0]
+        itemid = file_data.get('itemid')
+        contextid = file_data.get('contextid', 1)
+        
+        if not itemid:
+            raise Exception("No se obtuvo itemid del archivo")
+        
+        # 3. Generar enlace de descarga
+        enlace_final = f"{MOODLE_URL}/webservice/pluginfile.php/{contextid}/user/draft/{itemid}/{urllib.parse.quote(file_name)}?token={MOODLE_TOKEN}"
+        
+        logger.info(f"✅ Archivo subido exitosamente. ItemID: {itemid}")
+        
+        return {
+            'exito': True,
+            'enlace': enlace_final,
+            'nombre': file_name,
+            'tamaño': file_data.get('filesize', len(file_content)),
+            'itemid': itemid,
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error subiendo archivo: {e}")
+        return {'exito': False, 'error': str(e)}
 
 # ============================
 # FUNCIONES AUXILIARES
 # ============================
 def escape_md(text: str) -> str:
-    """Escapar caracteres para MarkdownV2 de Telegram"""
+    """Escapar caracteres para MarkdownV2"""
     if text is None:
         return ''
     escape_chars = r'\_*[]()~`>#+-=|{}.!'
-    return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
+    return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', str(text))
 
-def procesar_y_subir_file(chat_id, message_obj, file_id, file_name, file_size):
-    """Procesar y subir archivo con manejo de errores"""
+def safe_send_message(chat_id, text, reply_to_message_id=None, parse_mode=None):
+    """Enviar mensaje con manejo seguro de errores"""
     try:
-        # Verificar tamaño del archivo
-        if file_size > MAX_FILE_SIZE_MB * 1024 * 1024:
-            bot.reply_to(message_obj, f"❌ Máximo permitido: {MAX_FILE_SIZE_MB}MB")
-            return
-
-        # Descargar archivo de Telegram
-        file_info = bot.get_file(file_id)
-        downloaded = bot.download_file(file_info.file_path)
-        
-        # Enviar mensaje de estado
-        mensaje = bot.reply_to(message_obj, f"🌐 *{escape_md(file_name)}*\n🔄 Conectando con AulaElam...", parse_mode='MarkdownV2')
-        
-        # Subir a Moodle
-        resultado = subir_archivo_moodle(downloaded, file_name)
-        
-        if resultado['exito']:
-            respuesta = (
-                f"🎉 *¡ARCHIVO SUBIDO!*\n\n"
-                f"📄 **Archivo:** `{escape_md(resultado['nombre'])}`\n"
-                f"💾 **Tamaño:** {resultado['tamaño'] / 1024 / 1024:.2f} MB\n"
-                f"👤 **Usuario ID:** `{escape_md(str(resultado.get('user_id', 'N/A')))}`\n"
-                f"🆔 **ItemID:** `{escape_md(str(resultado['itemid']))}`\n"
-                f"🔗 **Proxy:** `{escape_md(str(resultado.get('proxy_used', 'N/A')))}`\n\n"
-                f"🔗 **ENLACE:**\n`{escape_md(resultado['enlace'])}`"
-            )
-            bot.edit_message_text(
-                chat_id=chat_id, 
-                message_id=mensaje.message_id, 
-                text=respuesta, 
-                parse_mode='MarkdownV2'
-            )
+        if parse_mode:
+            return bot.send_message(chat_id, text, reply_to_message_id=reply_to_message_id, parse_mode=parse_mode)
         else:
-            error_msg = (
-                f"❌ Error al subir archivo\n\n"
-                f"Archivo: {escape_md(file_name)}\n"
-                f"Error: {escape_md(resultado.get('error',''))}"
-            )
-            bot.edit_message_text(
-                chat_id=chat_id, 
-                message_id=mensaje.message_id,
-                text=error_msg, 
-                parse_mode='MarkdownV2'
-            )
+            return bot.send_message(chat_id, text, reply_to_message_id=reply_to_message_id)
     except Exception as e:
-        logger.error(f"Error en procesar_y_subir_file: {e}")
-        bot.reply_to(message_obj, f"❌ **Error interno:** {str(e)}")
+        logger.error(f"Error enviando mensaje: {e}")
+        # Fallback sin formato
+        return bot.send_message(chat_id, text, reply_to_message_id=reply_to_message_id)
 
 # ============================
 # HANDLERS DE TELEGRAM
@@ -429,192 +252,247 @@ def procesar_y_subir_file(chat_id, message_obj, file_id, file_name, file_size):
 @bot.message_handler(commands=['start', 'help'])
 def handle_start(message):
     """Manejar comando /start"""
+    logger.info(f"✅ Start recibido de {message.from_user.id}")
+    
     text = (
-        "🤖 *BOT AULAELAM - SUBIDA A MOODLE* 🤖\n\n"
-        "📤 Envíame cualquier archivo y lo subiré a AulaElam\n"
-        "✅ Formatos soportados: documentos, fotos, videos, audio\n"
-        f"📏 Tamaño máximo: {MAX_FILE_SIZE_MB}MB\n"
-        "🔗 *Usa proxies cubanos para conectividad*\n\n"
-        "⚠️ _Asegúrate de tener conexión a Internet_"
+        "🤖 *BOT AULAELAM* 🤖\n\n"
+        "✅ Envía cualquier archivo para subirlo a Moodle\n"
+        "📏 Tamaño máximo: 50MB\n"
+        "🔗 Usa proxies cubanos para conectividad\n\n"
+        "⚡ *Comandos:*\n"
+        "/start - Mostrar ayuda\n"
+        "/status - Estado del sistema\n"
+        "/proxy - Probar proxies"
     )
-    bot.send_message(message.chat.id, text, parse_mode='MarkdownV2')
+    
+    safe_send_message(message.chat.id, text, parse_mode='MarkdownV2')
 
-@bot.message_handler(commands=['status', 'proxy'])
+@bot.message_handler(commands=['status'])
 def handle_status(message):
-    """Verificar estado de la conexión con Moodle y proxies"""
+    """Verificar estado"""
     try:
-        status_msg = bot.reply_to(message, "🔍 Verificando conexión y proxies...")
+        proxy = get_working_proxy() or "DIRECTO"
+        text = f"🟢 *Bot activo*\n🔗 *Proxy:* `{proxy}`\n⏰ *Hora:* {time.strftime('%H:%M:%S')}"
+        safe_send_message(message.chat.id, text, parse_mode='MarkdownV2')
+    except Exception as e:
+        safe_send_message(message.chat.id, f"❌ Error: {str(e)}")
+
+@bot.message_handler(commands=['proxy'])
+def handle_proxy_test(message):
+    """Probar todos los proxies"""
+    try:
+        status_msg = safe_send_message(message.chat.id, "🔍 Probando proxies...")
+        results = []
         
-        # Probar proxies
-        proxy_status = []
         for proxy in CUBAN_PROXIES:
             if proxy is None:
-                continue
-            if test_proxy(proxy):
-                proxy_status.append(f"✅ {proxy}")
+                name = "SIN PROXY"
             else:
-                proxy_status.append(f"❌ {proxy}")
+                name = proxy
+                
+            if test_proxy(proxy):
+                results.append(f"✅ {name}")
+            else:
+                results.append(f"❌ {name}")
         
-        # Verificar Moodle
-        moodle_ok = moodle_session.test_session()
-        
-        # Construir respuesta
-        proxy_text = "\n".join(proxy_status[:4])  # Mostrar solo los primeros 4
-        moodle_text = "✅ ACTIVA" if moodle_ok else "❌ FALLIDA"
-        current_proxy = get_working_proxy() or "DIRECTO"
-        
-        respuesta = (
-            f"📊 *ESTADO DEL SISTEMA*\n\n"
-            f"🔗 **Moodle:** {moodle_text}\n"
-            f"🔄 **Proxy Actual:** `{current_proxy}`\n\n"
-            f"🌐 **Proxies Cubanos:**\n{proxy_text}"
-        )
-        
+        result_text = "🌐 *Resultados Proxy:*\n" + "\n".join(results)
         bot.edit_message_text(
+            result_text,
             chat_id=message.chat.id,
             message_id=status_msg.message_id,
-            text=respuesta,
             parse_mode='MarkdownV2'
         )
-                
     except Exception as e:
-        bot.reply_to(message, f"❌ Error verificando estado: {str(e)}")
+        safe_send_message(message.chat.id, f"❌ Error probando proxies: {str(e)}")
 
 @bot.message_handler(content_types=['document'])
 def manejar_documento(message):
-    """Manejar documentos enviados"""
-    doc = message.document
-    file_name = doc.file_name or f"documento_{message.message_id}"
-    procesar_y_subir_file(
-        message.chat.id, 
-        message, 
-        doc.file_id, 
-        file_name, 
-        doc.file_size or 0
-    )
+    """Manejar documentos"""
+    try:
+        doc = message.document
+        file_name = doc.file_name or f"documento_{message.message_id}"
+        file_size = doc.file_size or 0
+        
+        if file_size > MAX_FILE_SIZE_MB * 1024 * 1024:
+            safe_send_message(message.chat.id, f"❌ Máximo permitido: {MAX_FILE_SIZE_MB}MB")
+            return
+
+        file_info = bot.get_file(doc.file_id)
+        downloaded = bot.download_file(file_info.file_path)
+        
+        status_msg = safe_send_message(message.chat.id, f"📤 Subiendo {file_name}...")
+        
+        resultado = subir_archivo_moodle(downloaded, file_name)
+        
+        if resultado['exito']:
+            respuesta = (
+                f"✅ *Subido exitosamente*\n\n"
+                f"📄 *Archivo:* `{escape_md(resultado['nombre'])}`\n"
+                f"💾 *Tamaño:* {resultado['tamaño'] / 1024 / 1024:.2f} MB\n"
+                f"🔗 *Enlace:*\n`{escape_md(resultado['enlace'])}`"
+            )
+            bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=status_msg.message_id,
+                text=respuesta,
+                parse_mode='MarkdownV2'
+            )
+        else:
+            bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=status_msg.message_id,
+                text=f"❌ *Error*\n\nArchivo: `{escape_md(file_name)}`\nError: `{escape_md(resultado['error'])}`",
+                parse_mode='MarkdownV2'
+            )
+            
+    except Exception as e:
+        logger.error(f"Error manejando documento: {e}")
+        safe_send_message(message.chat.id, f"❌ Error: {str(e)}")
 
 @bot.message_handler(content_types=['photo'])
 def manejar_foto(message):
-    """Manejar fotos enviadas"""
-    photo = message.photo[-1]  # La foto de mayor calidad
-    file_name = f"foto_{message.message_id}.jpg"
-    procesar_y_subir_file(
-        message.chat.id, 
-        message, 
-        photo.file_id, 
-        file_name, 
-        photo.file_size or 0
-    )
+    """Manejar fotos"""
+    try:
+        photo = message.photo[-1]
+        file_name = f"foto_{message.message_id}.jpg"
+        file_size = photo.file_size or 0
+        
+        if file_size > MAX_FILE_SIZE_MB * 1024 * 1024:
+            safe_send_message(message.chat.id, f"❌ Máximo permitido: {MAX_FILE_SIZE_MB}MB")
+            return
 
-@bot.message_handler(content_types=['video'])
-def manejar_video(message):
-    """Manejar videos enviados"""
-    video = message.video
-    file_name = video.file_name or f"video_{message.message_id}.mp4"
-    procesar_y_subir_file(
-        message.chat.id, 
-        message, 
-        video.file_id, 
-        file_name, 
-        video.file_size or 0
-    )
+        file_info = bot.get_file(photo.file_id)
+        downloaded = bot.download_file(file_info.file_path)
+        
+        status_msg = safe_send_message(message.chat.id, f"📤 Subiendo {file_name}...")
+        
+        resultado = subir_archivo_moodle(downloaded, file_name)
+        
+        if resultado['exito']:
+            respuesta = f"✅ *Foto subida*\n\n🔗 *Enlace:*\n`{escape_md(resultado['enlace'])}`"
+            bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=status_msg.message_id,
+                text=respuesta,
+                parse_mode='MarkdownV2'
+            )
+        else:
+            bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=status_msg.message_id,
+                text=f"❌ Error subiendo foto: `{escape_md(resultado['error'])}`",
+                parse_mode='MarkdownV2'
+            )
+            
+    except Exception as e:
+        logger.error(f"Error manejando foto: {e}")
+        safe_send_message(message.chat.id, f"❌ Error: {str(e)}")
 
-@bot.message_handler(content_types=['audio'])
-def manejar_audio(message):
-    """Manejar audio enviado"""
-    audio = message.audio
-    file_name = audio.file_name or f"audio_{message.message_id}.mp3"
-    procesar_y_subir_file(
-        message.chat.id, 
-        message, 
-        audio.file_id, 
-        file_name, 
-        audio.file_size or 0
-    )
+@bot.message_handler(content_types=['video', 'audio', 'voice'])
+def manejar_otros_archivos(message):
+    """Manejar videos, audio y voz"""
+    try:
+        if message.video:
+            file_obj = message.video
+            file_name = file_obj.file_name or f"video_{message.message_id}.mp4"
+            tipo = "video"
+        elif message.audio:
+            file_obj = message.audio
+            file_name = file_obj.file_name or f"audio_{message.message_id}.mp3"
+            tipo = "audio"
+        elif message.voice:
+            file_obj = message.voice
+            file_name = f"voz_{message.message_id}.ogg"
+            tipo = "voz"
+        else:
+            return
 
-@bot.message_handler(content_types=['voice'])
-def manejar_voice(message):
-    """Manejar mensajes de voz"""
-    voice = message.voice
-    file_name = f"voz_{message.message_id}.ogg"
-    procesar_y_subir_file(
-        message.chat.id, 
-        message, 
-        voice.file_id, 
-        file_name, 
-        voice.file_size or 0
-    )
+        file_size = file_obj.file_size or 0
+        
+        if file_size > MAX_FILE_SIZE_MB * 1024 * 1024:
+            safe_send_message(message.chat.id, f"❌ Máximo permitido: {MAX_FILE_SIZE_MB}MB")
+            return
 
-@bot.message_handler(content_types=['animation'])
-def manejar_animation(message):
-    """Manejar GIFs/animaciones"""
-    animation = message.animation
-    file_name = animation.file_name or f"animacion_{message.message_id}.gif"
-    procesar_y_subir_file(
-        message.chat.id, 
-        message, 
-        animation.file_id, 
-        file_name, 
-        animation.file_size or 0
-    )
+        file_info = bot.get_file(file_obj.file_id)
+        downloaded = bot.download_file(file_info.file_path)
+        
+        status_msg = safe_send_message(message.chat.id, f"📤 Subiendo {tipo}...")
+        
+        resultado = subir_archivo_moodle(downloaded, file_name)
+        
+        if resultado['exito']:
+            respuesta = f"✅ *{tipo.capitalize()} subido*\n\n🔗 *Enlace:*\n`{escape_md(resultado['enlace'])}`"
+            bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=status_msg.message_id,
+                text=respuesta,
+                parse_mode='MarkdownV2'
+            )
+        else:
+            bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=status_msg.message_id,
+                text=f"❌ Error subiendo {tipo}: `{escape_md(resultado['error'])}`",
+                parse_mode='MarkdownV2'
+            )
+            
+    except Exception as e:
+        logger.error(f"Error manejando {tipo}: {e}")
+        safe_send_message(message.chat.id, f"❌ Error: {str(e)}")
 
 @bot.message_handler(func=lambda message: True)
 def handle_other_messages(message):
     """Manejar otros mensajes de texto"""
     if message.text and not message.text.startswith('/'):
-        bot.reply_to(
-            message, 
+        safe_send_message(message.chat.id, 
             "📤 Envíame un archivo (documento, foto, video, audio) para subirlo a AulaElam\n\n"
             "Usa /help para más información\n"
-            "Usa /status para ver el estado de conexión"
-        )
+            "Usa /status para ver el estado")
 
 # ============================
-# INICIALIZACIÓN Y MAIN
+# MANEJO DE ERRORES GLOBAL
 # ============================
-def inicializar_bot():
-    """Inicializar el bot y verificar conexiones"""
-    logger.info("🚀 INICIANDO BOT AULAELAM CON PROXIES CUBANOS...")
+def polling_error_handler(exception):
+    """Manejar errores de polling"""
+    logger.error(f"❌ Error en polling: {exception}")
+    if "409" in str(exception):
+        logger.error("🔄 Error 409: Otra instancia detectada. Esperando...")
+        time.sleep(10)
+    return True
+
+# ============================
+# MAIN
+# ============================
+def main():
+    logger.info("🚀 INICIANDO BOT AULAELAM...")
     
-    # Verificar token de Telegram
+    # Verificar token
     try:
         bot_info = bot.get_me()
-        logger.info(f"✅ Bot de Telegram conectado: @{bot_info.username}")
+        logger.info(f"✅ Bot conectado: @{bot_info.username} (ID: {bot_info.id})")
     except Exception as e:
-        logger.error(f"❌ Error conectando con Telegram: {e}")
-        return False
+        logger.error(f"❌ Error con token: {e}")
+        return
     
-    # Probar proxies al inicio
-    logger.info("🔍 Probando proxies cubanos...")
-    working_proxy = get_working_proxy()
-    if working_proxy:
-        logger.info(f"✅ Proxy seleccionado: {working_proxy}")
-    else:
-        logger.warning("⚠️ No hay proxies funcionales, usando conexión directa")
+    # Probar proxies
+    proxy = get_working_proxy()
+    logger.info(f"🔗 Proxy: {proxy or 'DIRECTO'}")
     
-    # Intentar login inicial con Moodle
-    logger.info("🔗 Conectando con Moodle...")
-    if moodle_session.login_to_moodle():
-        logger.info("✅ Sesión inicial con Moodle establecida")
-        return True
-    else:
-        logger.warning("⚠️ No se pudo establecer sesión inicial con Moodle")
-        logger.warning("⚠️ El bot funcionará pero puede fallar en subidas")
-        return True  # Permitir que el bot inicie igual
-
-def main():
-    """Función principal"""
-    if inicializar_bot():
-        logger.info("🎉 Bot iniciado correctamente con soporte de proxies")
-        try:
-            bot.infinity_polling(timeout=60, long_polling_timeout=60)
-        except Exception as e:
-            logger.error(f"❌ Error en el bot: {e}")
-            logger.info("🔄 Reiniciando en 10 segundos...")
-            time.sleep(10)
-            main()  # Reiniciar
-    else:
-        logger.error("❌ No se pudo inicializar el bot")
+    # Iniciar polling con manejo de errores
+    logger.info("🔄 Iniciando polling...")
+    try:
+        bot.infinity_polling(
+            timeout=60, 
+            long_polling_timeout=60,
+            logger_level=logging.INFO,
+            allowed_updates=None,
+            restart_on_change=True
+        )
+    except Exception as e:
+        logger.error(f"❌ Error crítico: {e}")
+        logger.info("🔄 Reiniciando en 10 segundos...")
+        time.sleep(10)
+        main()  # Reiniciar
 
 if __name__ == "__main__":
     main()
